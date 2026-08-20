@@ -150,6 +150,13 @@ if ($wikiChoice -ne "y") {
     Write-Host "     既存プロジェクトへの導入手順は docs/wiki_workflow.md を参照。"
 }
 
+# --- テンプレート自身の検査ワークフロー(コピー先には不要) ---
+if (Test-Path ".github/workflows/selfcheck.yml") {
+    Remove-Item -Force ".github/workflows/selfcheck.yml"
+    Write-Host ""
+    Write-Host "  -> .github/workflows/selfcheck.yml を削除しました(テンプレート自身の検査用のため)。"
+}
+
 Write-Host ""
 Write-Host "セットアップ完了。次のファイルのプレースホルダーを埋めてください:" -ForegroundColor Cyan
 Write-Host "  - CLAUDE.md"

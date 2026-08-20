@@ -153,6 +153,13 @@ else
     echo "     既存プロジェクトへの導入手順は docs/wiki_workflow.md を参照。"
 fi
 
+# --- テンプレート自身の検査ワークフロー(コピー先には不要) ---
+if [[ -f ".github/workflows/selfcheck.yml" ]]; then
+    rm -f .github/workflows/selfcheck.yml
+    echo ""
+    echo "  -> .github/workflows/selfcheck.yml を削除しました(テンプレート自身の検査用のため)。"
+fi
+
 echo ""
 echo "セットアップ完了。次のファイルのプレースホルダーを埋めてください:"
 echo "  - CLAUDE.md"

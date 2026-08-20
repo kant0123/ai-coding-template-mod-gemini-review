@@ -36,7 +36,8 @@ CI/CD の仕組みはエージェントに依存しない汎用部分。
 | [.claude/settings.example.json](.claude/settings.example.json) | permissions / hooks の設定例 | オプション |
 | [docs/development_workflow.md](docs/development_workflow.md) | worktree ベースの Git 運用 + CI/CD の全体像 | 推奨 |
 | [docs/wiki_workflow.md](docs/wiki_workflow.md) | Wiki の背景・導入手順・既存プロジェクトからの移行手順 | 推奨 |
-| [.github/workflows/test.yml](.github/workflows/test.yml) | CI(push/PR で自動テスト) | 推奨(既定で有効) |
+| [.github/workflows/test.yml](.github/workflows/test.yml) | CI(push/PR で自動テスト)。テストの仕組みがまだ無いうちは警告だけ出して成功する | 推奨(既定で有効) |
+| [.github/workflows/selfcheck.yml](.github/workflows/selfcheck.yml) | **このテンプレート自身**の検査(wiki-lint / シェルと PowerShell の構文 / `.ps1` の BOM)。コピー先には不要で、セットアップスクリプトが削除する | テンプレート専用 |
 | [.github/workflows-optional/](.github/workflows-optional/README.md) | CD(self-hosted デプロイ)・label-hygiene・wiki-check の雛形。`.github/workflows/` に置くまで実行されない | オプション |
 | [deploy/](deploy/README.md) | CD スクリプト雛形(CI 再確認・drift 検知・バックアップ・反映確認・失敗時ロールバック・結果の可視化)と watchdog 雛形。runner のサービス化を含む導入手順と落とし穴は `deploy/README.md` | オプション |
 | [scripts/worktree-cleanup.ps1](scripts/worktree-cleanup.ps1) | `git worktree remove` が Permission denied で失敗した後の復旧(Windows 専用) | オプション |

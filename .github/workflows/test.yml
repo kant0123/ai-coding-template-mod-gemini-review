@@ -2,6 +2,10 @@ name: tests
 
 # CI(常時導入を推奨)。push/PR のたびにテストを自動実行する。
 # 既定は Python + pytest。他スタックの場合は setup ステップとテストコマンドを書き換える。
+#
+# テストの仕組みがまだ無いリポジトリ(このテンプレートをコピーした直後)では、
+# 失敗させずに警告だけ出して終わる。**常時赤い CI は「無視するもの」に変わる**ため、
+# 落とすのは「テストがあって落ちた」ときだけにしてある。
 
 on:
   push:
@@ -16,7 +20,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect test setup
+        id: detect
+        run: |
+          if [ -f requirements.txt ] || [ -f pyproject.toml ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::requirements.txt / pyproject.toml が無いのでテストを実行していません。スタックに合わせて .github/workflows/test.yml を書き換えてください。"
+          fi
+
       - name: Set up Python
+        if: steps.detect.outputs.found == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -24,9 +39,11 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
+        if: steps.detect.outputs.found == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run tests
+        if: steps.detect.outputs.found == 'true'
         run: python -m pytest tests/ -v

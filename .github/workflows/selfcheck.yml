@@ -1,0 +1,72 @@
+name: selfcheck
+
+# **このテンプレートのリポジトリ自身を検査するワークフロー。**
+# テンプレートをコピーして使う側には不要なので、コピー後は削除してよい
+# (scripts/setup.sh / setup.ps1 も削除の対象にしている)。
+#
+# 収録物が壊れたまま配られるのを防ぐのが目的。実際、git 管理下に置く前に
+# scripts/setup.ps1 の BOM 欠落を手作業で見つけている — それを機械に降ろしたもの。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # wiki-lint が frontmatter の updated を最終コミット日と突き合わせるため、
+          # 浅いクローンでは足りない(浅いと検査を黙って飛ばす)。
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: wiki-lint (収録している wiki の骨組み)
+        run: node scripts/wiki-lint.js
+
+      - name: シェルスクリプトの構文
+        run: |
+          status=0
+          while IFS= read -r file; do
+            bash -n "$file" || status=1
+          done < <(find . -name '*.sh' -not -path './.git/*')
+          exit $status
+
+      - name: PowerShell の構文
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -File -Include *.ps1, *.ps1.example | ForEach-Object {
+            $errors = $null
+            # .example は拡張子が .ps1 でないため、内容を読んでパースする
+            $text = Get-Content -LiteralPath $_.FullName -Raw
+            [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Host "::error file=$($_.FullName)::PowerShell パースエラー $($errors.Count) 件"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: .ps1 の BOM
+        shell: pwsh
+        run: |
+          # BOM が無いと Windows PowerShell 5.1 が CP932 として読み、日本語が化けて
+          # スクリプトが 1 行も実行されずパースエラーで落ちる。テンプレート自身の規約。
+          $failed = $false
+          Get-ChildItem -Recurse -File -Include *.ps1, *.ps1.example | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)[0..2]
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+              Write-Host "::error file=$($_.FullName)::UTF-8 BOM が無い"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
