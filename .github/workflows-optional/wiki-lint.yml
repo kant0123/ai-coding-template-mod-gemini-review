@@ -1,0 +1,40 @@
+name: wiki-lint
+
+# [オプション] wiki/ の機械的な整合性チェック(scripts/wiki-lint.js)。
+#
+# wiki-check.yml が「PR に wiki/ の更新が含まれているか」(= Ingest したか)を見るのに対し、
+# こちらは「wiki/ の中身が整合しているか」を見る。役割が違うので併用できる。
+#
+# 【CI ワークフローに相乗りさせない理由】
+# self-hosted CD (deploy.yml) は workflow_run で CI ワークフローの conclusion が
+# success になるのを待つ。テストのワークフローに wiki-lint を足すと、Wiki の不整合 1 件で
+# ワークフロー全体が失敗し、**本番デプロイまで止まる**。ドキュメントの不整合で本番が
+# 古いまま取り残されるのは割に合わないため、独立したワークフローにしている。
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  wiki-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # frontmatter の updated を各ファイルの最終コミット日と突き合わせるため、
+          # 既定の浅いクローン(fetch-depth: 1)では履歴が足りない。浅いままだと
+          # スクリプトは日付の検査を黙って飛ばすので「通っているのに何も見ていない」状態になる。
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Lint wiki
+        run: node scripts/wiki-lint.js

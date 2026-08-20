@@ -1,0 +1,27 @@
+{
+  "_comment": "このファイルは .claude/settings.json (チーム共有) または .claude/settings.local.json (個人用・gitignore 対象) にコピーして使う。プレースホルダーを実プロジェクトに合わせて調整すること。",
+
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(python -m pytest *)"
+    ]
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "_comment": "[オプション] gh pr create 前に wiki/ の更新有無を確認する。使わないなら削除。",
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check_wiki_updated.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

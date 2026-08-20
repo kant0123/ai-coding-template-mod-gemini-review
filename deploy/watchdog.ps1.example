@@ -1,0 +1,149 @@
+﻿<#
+  [オプション] プロセス死活監視(watchdog)テンプレート。
+  タスクスケジューラ / cron から数分おきに実行する想定。
+
+  なぜ要るか:
+    CD だけではプロセスの停止に気づけない。デプロイは「更新があるとき」しか走らず、
+    アプリのタスクがシステム起動時にしか起動しない構成では、プロセスが落ちると
+    次のデプロイまで本番が停止したままになる。そこを埋めるのが watchdog。
+
+  判断の分岐(ここが know-how):
+    - ヘルスチェックへ接続できない → プロセスが落ちている。再起動する。
+    - 接続できるが 200 以外       → プロセスは生きている。**再起動しない**。
+                                    再起動しても直らず、DB 障害などを隠すだけのため。
+    - 200                         → 何もしない(通常時は無言。ログも残さない)。
+
+  使うには deploy/watchdog.ps1 としてコピーし、Restart-App を実プロジェクトの
+  再起動コマンドに書き換える。**必ず UTF-8 (BOM 付き) で保存すること**
+  (BOM が無いと Windows PowerShell 5.1 が CP932 として読み、日本語が化けて落ちる)。
+
+  タスクを SYSTEM で登録する場合、ユーザー環境変数に置いた DISCORD_WEBHOOK_URL は
+  見えない。通知が要るならシステム環境変数に設定すること。
+#>
+
+param(
+    [string]$HealthCheckUrl = $(if ($env:APP_HEALTH_URL) { $env:APP_HEALTH_URL } else { "http://localhost:8000/healthz" }),
+    [string]$RestartCommand = $(if ($env:APP_RESTART_CMD) { $env:APP_RESTART_CMD } else { "" }),
+    [string]$LogDirectory = $(if ($env:APP_REPO_PATH) { Join-Path $env:APP_REPO_PATH "logs" } else { "" }),
+    # 一時的な高負荷での誤検知を避けるため、この回数連続で失敗したときだけ再起動する。
+    [int]$FailureThreshold = 3,
+    [int]$IntervalSeconds = 5,
+    [int]$TimeoutSeconds = 10,
+    [int]$RecoveryRetries = 6,
+    [int]$RecoveryIntervalSeconds = 5
+)
+
+$ErrorActionPreference = "Stop"
+
+$COLOR_SUCCESS = 5763719
+$COLOR_ERROR   = 15548997
+
+function Send-WatchdogNotification {
+    param([string]$Title, [int]$Color, [string[]]$Lines)
+    $webhook = $env:DISCORD_WEBHOOK_URL
+    if ([string]::IsNullOrWhiteSpace($webhook)) { return }
+    $payload = @{ embeds = @(@{ title = $Title; description = ($Lines -join "`n"); color = $Color }) } | ConvertTo-Json -Depth 5
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        Invoke-RestMethod -Uri $webhook -Method Post -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 10 | Out-Null
+    }
+    catch {
+        Write-Host "通知の送信に失敗しました(処理は継続します)。" -ForegroundColor DarkYellow
+    }
+}
+
+# HTTP ステータスを返す。接続すらできなければ $null。
+function Get-HealthCode {
+    param([string]$Url)
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -TimeoutSec $TimeoutSeconds -UseBasicParsing
+        return [int]$resp.StatusCode
+    }
+    catch {
+        try {
+            $code = [int]$_.Exception.Response.StatusCode
+            if ($code -gt 0) { return $code }
+        }
+        catch { }
+        return $null
+    }
+}
+
+function Write-WatchdogLog {
+    param([string]$Message)
+    Write-Host $Message
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) { return }
+    try {
+        if (-not (Test-Path $LogDirectory)) { New-Item -ItemType Directory -Path $LogDirectory | Out-Null }
+        $line = "{0} {1}" -f (Get-Date).ToString("yyyy-MM-ddTHH:mm:sszzz"), $Message
+        Add-Content -Path (Join-Path $LogDirectory "watchdog.log") -Value $line -Encoding utf8
+    }
+    catch { }
+}
+
+# --- プロジェクト固有の手順(ここを書き換える) ---
+
+function Restart-App {
+    # 例: Restart-Service <名前> / Stop-ScheduledTask + Start-ScheduledTask / pm2 restart
+    if ($RestartCommand -eq "") { throw "再起動コマンドが設定されていません。" }
+    Invoke-Expression $RestartCommand
+}
+
+# --- メイン ---
+
+$code = $null
+for ($i = 1; $i -le $FailureThreshold; $i++) {
+    $code = Get-HealthCode -Url $HealthCheckUrl
+    if ($null -ne $code) { break }
+    if ($i -lt $FailureThreshold) { Start-Sleep -Seconds $IntervalSeconds }
+}
+
+if ($null -ne $code) {
+    if ($code -ne 200) {
+        Write-WatchdogLog "watchdog: 応答は異常だがプロセスは生存 (HTTP $code)。再起動しない。"
+        Send-WatchdogNotification -Title "⚠️ アプリの応答が異常です" -Color $COLOR_ERROR -Lines @(
+            "``$HealthCheckUrl`` が HTTP $code を返しています。",
+            "プロセスは生きているため**再起動しません**(再起動しても直らず、原因を隠すだけのため)。",
+            "アプリのログを確認してください。"
+        )
+    }
+    exit 0
+}
+
+# --- 接続できない = 落ちている ---
+Write-WatchdogLog "watchdog: $HealthCheckUrl へ接続できません。再起動します。"
+
+try {
+    Restart-App
+}
+catch {
+    Write-WatchdogLog "watchdog: 再起動に失敗しました: $_"
+    Send-WatchdogNotification -Title "🚨 自動復旧に失敗しました" -Color $COLOR_ERROR -Lines @(
+        "``$HealthCheckUrl`` へ接続できず、再起動にも失敗しました。",
+        "原因: $_",
+        "手動対応が必要です。"
+    )
+    exit 1
+}
+
+$recovered = $false
+for ($i = 1; $i -le $RecoveryRetries; $i++) {
+    Start-Sleep -Seconds $RecoveryIntervalSeconds
+    if ((Get-HealthCode -Url $HealthCheckUrl) -eq 200) { $recovered = $true; break }
+}
+
+if ($recovered) {
+    Write-WatchdogLog "watchdog: 再起動で復旧しました。"
+    Send-WatchdogNotification -Title "🔄 アプリを自動復旧しました" -Color $COLOR_SUCCESS -Lines @(
+        "``$HealthCheckUrl`` へ接続できなくなっていたため再起動しました。",
+        "現在は正常に応答しています。落ちた原因はアプリのログを確認してください。"
+    )
+    exit 0
+}
+
+Write-WatchdogLog "watchdog: 再起動しても復旧しませんでした。"
+Send-WatchdogNotification -Title "🚨 アプリが復旧しません" -Color $COLOR_ERROR -Lines @(
+    "``$HealthCheckUrl`` へ接続できず、再起動しても復旧しませんでした。",
+    "手動対応が必要です。"
+)
+exit 1

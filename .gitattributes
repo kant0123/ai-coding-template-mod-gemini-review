@@ -1,0 +1,9 @@
+# 既定: リポジトリ内は LF に正規化し、チェックアウト時は環境に合わせる。
+* text=auto
+
+# .ps1 は CRLF で固定する。Windows PowerShell 5.1 向けのスクリプトであり、
+# UTF-8 (BOM 付き) で保存する規約(BOM が無いと CP932 として読まれ、日本語が化けて
+# 1 行も実行されない)と合わせて、改行も Windows 側に揃えておく。
+# BOM はファイルの中身なので git がそのまま保持する。
+*.ps1 text eol=crlf
+*.ps1.example text eol=crlf

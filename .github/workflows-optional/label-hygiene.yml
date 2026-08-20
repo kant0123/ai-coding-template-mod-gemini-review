@@ -1,0 +1,31 @@
+# [オプション] GitHub Issues / Projects 連携の補助ワークフロー。
+# Issue クローズ時に依存ブロック用ラベル(既定 status:blocked)が残っていれば自動で外す。
+# 依存が解消したから実装・クローズできているはずで、閉じた Issue にラベルが残ると
+# ラベル検索のノイズになるため。
+#
+# 使うには: このファイルを .github/workflows/label-hygiene.yml にコピーし、
+# ラベル名をプロジェクトの実ラベルに合わせて書き換える。
+
+name: label-hygiene
+
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  strip-blocked:
+    if: contains(github.event.issue.labels.*.name, 'status:blocked')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Remove status:blocked label
+        run: gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "status:blocked"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}

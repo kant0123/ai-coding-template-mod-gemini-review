@@ -1,0 +1,46 @@
+name: wiki-check
+
+# [オプション] PR に wiki/ の更新が含まれているかを確認する。
+#
+# 落とすのではなく「気付かせる」ためのチェック。既定では警告のみで success する。
+# 必須ゲートにしたい場合は最後の `exit 0` を `exit 1` に変える。
+# `wiki:skip` ラベルが付いた PR はスキップする。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  wiki-updated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: "!contains(github.event.pull_request.labels.*.name, 'wiki:skip')"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check that wiki/ was updated
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "変更ファイル:"
+          echo "$changed"
+
+          if echo "$changed" | grep -q '^wiki/'; then
+            echo "::notice::wiki/ が更新されています。"
+            exit 0
+          fi
+
+          # ドキュメントのみの PR では促さない
+          if ! echo "$changed" | grep -qv -e '^README\.md$' -e '^\.gitignore$' -e '^docs/'; then
+            echo "::notice::ドキュメントのみの変更のため wiki 更新チェックをスキップします。"
+            exit 0
+          fi
+
+          echo "::warning::この PR に wiki/ の更新が含まれていません。CLAUDE.md の「ナレッジ Wiki」→ Ingest に従って影響ページと wiki/log.md を更新するか、更新不要な理由を PR 本文に書いて 'wiki:skip' ラベルを付けてください。"
+          exit 0

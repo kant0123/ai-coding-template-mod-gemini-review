@@ -1,0 +1,486 @@
+﻿<#
+  [オプション] self-hosted runner 方式の CD スクリプト テンプレート。
+  開発機と本番機が同一マシンという構成(小規模な自宅サーバー運用など)を想定。
+
+  使うには:
+    1. deploy/auto_deploy.ps1 としてコピーし、Invoke-DependencyInstall /
+       Invoke-PreDeployBackup / Invoke-Migration / Restart-App を実プロジェクトの
+       コマンドに書き換える。**必ず UTF-8 (BOM 付き) で保存すること**(下記)。
+    2. .github/workflows-optional/deploy.yml を .github/workflows/deploy.yml に
+       コピーし、リポジトリ変数 SELF_HOSTED_DEPLOY を true にする。
+    3. 環境変数を runner に設定する(APP_REPO_PATH / APP_HEALTH_URL / APP_RESTART_CMD /
+       DISCORD_WEBHOOK_URL。いずれも任意。未設定ならこのファイルの既定値を使う)。
+    4. **アプリの /healthz に稼働中コミットの short SHA を出す**(下記「反映確認」)。
+
+  【文字コード】このファイルは必ず UTF-8 (BOM 付き) で保存すること。
+    BOM が無いと Windows PowerShell 5.1 が CP932 として読み、日本語のコメント・文字列が
+    化けて引用符の対応が崩れ、**スクリプトが 1 行も実行されずパースエラーで落ちる**。
+    ワークフロー側を shell: pwsh(PowerShell 7)にすれば BOM 非依存になるが、runner の
+    実行アカウントから pwsh が解決できるとは限らないので、両方やっておくのが安全。
+
+  安全設計の要点(このテンプレートが体現している know-how):
+    - 変更検知: 作業ツリーの HEAD が origin/<branch> と同じなら何もしない(冪等)。
+    - drift 検知: ただし「更新なし」で緑に終わる前に、稼働中コミットと HEAD を突き合わせる。
+      不一致なら**ジョブを失敗させる** — 誰かがメインツリーで手動 pull/merge して CD を
+      空振りさせると、本番プロセスだけが古いコードのまま動き続けるため。
+    - CI 再確認(フェイルクローズ): デプロイ直前に対象コミットの CI 結論を
+      GitHub API で再確認し、success 以外なら前進しない。CI が「そのうち緑になる」
+      可能性がある push 直後の反映遅延に備え、pending は数回リトライする。
+    - fast-forward のみ: git merge --ff-only。分岐していれば安全側に倒して失敗させる。
+    - デプロイ前バックアップ → マイグレーションの順(バックアップ失敗ならマイグレーション中止)。
+    - 反映確認: ヘルスチェックが 200 を返すだけでは足りない。**古いプロセスが生き残っていても
+      200 は返る**ため、稼働中コミットが target と一致するまで確認する。
+    - ヘルスチェック失敗時は直前コミットへ git reset --hard でロールバック
+      (逆マイグレーションは危険なため自動実行しない。DB は手動確認・手動リストア前提)。
+    - 結果を Discord 等へ通知し、GitHub Actions の job summary / step outputs にも出す
+      (実デプロイと no-op をログ本文を読まずに区別できるようにするため)。
+    - デプロイ履歴を logs/deploy-history.jsonl へ 1 行追記(Actions の履歴は保持期間で消え、
+      手動実行分は残らないため)。
+
+  【反映確認に必要なアプリ側の対応】
+    /healthz のレスポンスに稼働中コミットの short SHA を `commit` として出すこと。
+    起動時に一度だけ HEAD を解決する(`git rev-parse HEAD` を優先し、失敗したら .git を
+    直接読む。worktree では .git がファイルで `gitdir: <path>` を指す点に注意)。
+    取得できなければ null を返し、**例外でアプリを落とさない**。
+    commit が無い場合、このスクリプトは drift を判定できず no-op 扱いになる(安全側)。
+#>
+
+param(
+    [string]$RepositoryPath = $(if ($env:APP_REPO_PATH) { $env:APP_REPO_PATH } else { "C:\path\to\production\checkout" }),
+    [string]$Branch = "main",
+    [string]$ServiceRestartCommand = $(if ($env:APP_RESTART_CMD) { $env:APP_RESTART_CMD } else { "" }),
+    # CI ステータス確認に使う GitHub リポジトリ(owner/name)。
+    [string]$Repo = "owner/repo",
+    # CI 成否を判定する対象チェック(= tests ワークフローのジョブ名)。
+    [string]$CiCheckName = "test",
+    [string]$HealthCheckUrl = $(if ($env:APP_HEALTH_URL) { $env:APP_HEALTH_URL } else { "http://localhost:8000/healthz" }),
+    [int]$HealthCheckRetries = 6,
+    [int]$HealthCheckIntervalSeconds = 5,
+    [int]$CiCheckRetries = 6,
+    [int]$CiCheckIntervalSeconds = 10,
+    [int]$CommitCheckRetries = 6,
+    [int]$CommitCheckIntervalSeconds = 5
+)
+
+$ErrorActionPreference = "Stop"
+
+$COLOR_SUCCESS = 5763719   # 緑
+$COLOR_WARNING = 15105570  # 橙(ロールバック成功・要注意)
+$COLOR_ERROR   = 15548997  # 赤(ロールバック失敗・停止)
+
+$HEALTH_TIMEOUT_SECONDS = 10
+
+function Send-DeployNotification {
+    param([string]$Title, [int]$Color, [string[]]$Lines)
+    $webhook = $env:DISCORD_WEBHOOK_URL
+    if ([string]::IsNullOrWhiteSpace($webhook)) { return }
+    $payload = @{ embeds = @(@{ title = $Title; description = ($Lines -join "`n"); color = $Color }) } | ConvertTo-Json -Depth 5
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        Invoke-RestMethod -Uri $webhook -Method Post -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 10 | Out-Null
+    }
+    catch {
+        Write-Host "通知の送信に失敗しました(処理は継続します)。" -ForegroundColor DarkYellow
+    }
+}
+
+# ---------------------------------------------------------------------------
+# GitHub Actions への結果出力。実デプロイと no-op を外形的に区別できるようにする。
+# Actions 外(手動実行)では環境変数が無いのでコンソール出力だけになる。
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# BOM 無しで 1 行追記する。
+# Windows PowerShell 5.1 の `Add-Content -Encoding utf8` は BOM を付けてしまい、
+# $GITHUB_OUTPUT の 1 行目が `<BOM>deployed=...` になると step output が読めない
+# (deploy-history.jsonl も壊れる)。pwsh 7 では -Encoding utf8 が BOM 無しなので、
+# 5.1 で実行して初めて表面化する差分。インタプリタに依存しないようここで揃える。
+# ---------------------------------------------------------------------------
+function Add-Utf8NoBomLine {
+    param([string]$Path, [string]$Value)
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::AppendAllText($Path, $Value + [Environment]::NewLine, $encoding)
+}
+
+function Write-DeployOutcome {
+    param(
+        [bool]$Deployed,
+        [string]$Status,      # no-op / drift / skipped / deployed / rolled_back / failed / down / error
+        [string]$Detail,
+        [string[]]$Rows = @()
+    )
+
+    $deployedText = if ($Deployed) { "true" } else { "false" }
+    Write-Host "デプロイ結果: deployed=$deployedText status=$Status ($Detail)" -ForegroundColor Cyan
+
+    try {
+        if ($env:GITHUB_OUTPUT) {
+            Add-Utf8NoBomLine -Path $env:GITHUB_OUTPUT -Value "deployed=$deployedText"
+            Add-Utf8NoBomLine -Path $env:GITHUB_OUTPUT -Value "status=$Status"
+        }
+        if ($env:GITHUB_STEP_SUMMARY) {
+            $lines = @(
+                "### デプロイ結果",
+                "",
+                "| 項目 | 値 |",
+                "| --- | --- |",
+                "| deployed | ``$deployedText`` |",
+                "| status | ``$Status`` |",
+                "| 詳細 | $Detail |"
+            ) + $Rows
+            Add-Utf8NoBomLine -Path $env:GITHUB_STEP_SUMMARY -Value ($lines -join "`n")
+        }
+    }
+    catch {
+        Write-Host "GitHub Actions への結果出力に失敗しました(処理は継続します)。" -ForegroundColor DarkGray
+    }
+}
+
+# ---------------------------------------------------------------------------
+# デプロイ履歴。logs/deploy-history.jsonl へ 1 行追記する(ベストエフォート)。
+# ---------------------------------------------------------------------------
+function Record-DeployLog {
+    param([string]$RepoPath, [string]$From, [string]$To, [string]$Status, [string]$Detail)
+    try {
+        $dir = Join-Path $RepoPath "logs"
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+        $entry = [ordered]@{
+            at     = (Get-Date).ToString("yyyy-MM-ddTHH:mm:sszzz")
+            from   = $From
+            to     = $To
+            status = $Status
+            detail = $Detail
+        }
+        Add-Utf8NoBomLine -Path (Join-Path $dir "deploy-history.jsonl") -Value ($entry | ConvertTo-Json -Compress -Depth 3)
+    }
+    catch {
+        Write-Host "デプロイ履歴の記録に失敗しました(処理は継続します)。" -ForegroundColor DarkGray
+    }
+}
+
+# CI 結論を返す: "success" / "pending" / "failure" / "unknown"
+# フェイルクローズ: 判定不能・未完了・失敗のときは前進しない。
+function Get-CiConclusion {
+    param([string]$RepoSlug, [string]$Sha, [string]$CheckName)
+    $json = $null
+    try {
+        $raw = & gh api "repos/$RepoSlug/commits/$Sha/check-runs" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $raw) { $json = $raw | ConvertFrom-Json }
+    }
+    catch { $json = $null }
+    if ($null -eq $json) { return "unknown" }
+
+    $runs = @($json.check_runs) | Where-Object { $_.name -eq $CheckName }
+    if ($runs.Count -eq 0) { return "pending" }
+
+    $failureConclusions = @("failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale")
+    foreach ($run in $runs) {
+        if ($run.status -ne "completed") { return "pending" }
+        if ($failureConclusions -contains $run.conclusion) { return "failure" }
+    }
+    return "success"
+}
+
+# ---------------------------------------------------------------------------
+# ヘルスチェック。
+#   接続不能($null)と「応答はするが異常(5xx)」を区別する。前者は再起動で復旧しうるが、
+#   後者は再起動しても直らず障害(DB 不通など)を隠すだけなので扱いを変える必要がある。
+#   HTTPS で証明書が自己署名などの場合は curl.exe -sk へ差し替える。
+# ---------------------------------------------------------------------------
+function Get-HealthResponse {
+    param([string]$Url)
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -TimeoutSec $HEALTH_TIMEOUT_SECONDS -UseBasicParsing
+        return @{ Code = [int]$resp.StatusCode; Body = "$($resp.Content)" }
+    }
+    catch {
+        $status = $null
+        try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = $null }
+        $body = ""
+        try { $body = "$($_.ErrorDetails.Message)" } catch { $body = "" }
+        if ($null -ne $status -and $status -gt 0) { return @{ Code = $status; Body = $body } }
+        return $null   # 接続すらできていない
+    }
+}
+
+function Get-HealthCode {
+    param([string]$Url)
+    $resp = Get-HealthResponse -Url $Url
+    if ($null -eq $resp) { return $null }
+    return "$($resp.Code)"
+}
+
+function ConvertTo-RunningCommit {
+    param([string]$ResponseBody)
+    if ([string]::IsNullOrWhiteSpace($ResponseBody)) { return $null }
+    try { $json = $ResponseBody | ConvertFrom-Json } catch { return $null }
+    if ($null -eq $json -or [string]::IsNullOrWhiteSpace($json.commit)) { return $null }
+    return ([string]$json.commit).Trim()
+}
+
+function Get-RunningCommit {
+    param([string]$Url)
+    $resp = Get-HealthResponse -Url $Url
+    if ($null -eq $resp) { return $null }
+    # 異常応答(5xx)でも commit は返りうるので、ステータスではなく本文を見る。
+    return ConvertTo-RunningCommit -ResponseBody $resp.Body
+}
+
+# 稼働中コミットと期待値の突合: "ok" / "drift" / "unknown"
+function Get-DriftState {
+    param([string]$ExpectedShort, [string]$RunningShort)
+    if ([string]::IsNullOrWhiteSpace($RunningShort)) { return "unknown" }
+    if ($RunningShort -eq $ExpectedShort) { return "ok" }
+    return "drift"
+}
+
+# 稼働中コミットが期待値になるまで待つ(再起動直後は古い SHA が返りうるため)。
+function Wait-RunningCommit {
+    param([string]$Url, [string]$ExpectedShort, [int]$Retries, [int]$IntervalSeconds)
+    $running = $null
+    for ($i = 1; $i -le $Retries; $i++) {
+        $running = Get-RunningCommit -Url $Url
+        if ($running -eq $ExpectedShort) { return $running }
+        if ($i -lt $Retries) { Start-Sleep -Seconds $IntervalSeconds }
+    }
+    return $running
+}
+
+function Test-Health {
+    param([string]$Url, [int]$Retries, [int]$IntervalSeconds)
+    for ($i = 1; $i -le $Retries; $i++) {
+        if ((Get-HealthCode -Url $Url) -eq "200") { return $true }
+        if ($i -lt $Retries) { Start-Sleep -Seconds $IntervalSeconds }
+    }
+    return $false
+}
+
+# --- プロジェクト固有の手順(ここを書き換える) ---
+
+function Invoke-DependencyInstall {
+    # 例: npm install / pip install -r requirements.txt / bundle install
+}
+
+function Invoke-PreDeployBackup {
+    # 例: npm run backup / pg_dump / sqlite3 VACUUM INTO
+    # 成功したら $true を返す。失敗したらデプロイを中止する。
+    return $true
+}
+
+function Invoke-Migration {
+    # 例: alembic upgrade head / npx prisma migrate deploy
+    # マイグレーションが無いなら空のままでよい。
+}
+
+function Restart-App {
+    # 例: Restart-Service / Stop-ScheduledTask + Start-ScheduledTask / pm2 restart
+    if ($ServiceRestartCommand -ne "") {
+        Invoke-Expression $ServiceRestartCommand
+    }
+}
+
+# --- メイン ---
+
+if (!(Test-Path $RepositoryPath)) {
+    Write-Host "指定ディレクトリが存在しません: $RepositoryPath" -ForegroundColor Red
+    Write-DeployOutcome -Deployed $false -Status "error" -Detail "指定ディレクトリが存在しません: $RepositoryPath"
+    exit 1
+}
+
+Push-Location $RepositoryPath
+try {
+    $before = (git rev-parse HEAD).Trim()
+    git fetch origin | Out-Null
+    $target = (git rev-parse "origin/$Branch").Trim()
+
+    $shortBefore = $before.Substring(0, 7)
+    $shortTarget = $target.Substring(0, 7)
+
+    # --- 更新なし: 終わる前に本番が古いまま取り残されていないか確認する ---
+    if ($before -eq $target) {
+        $running = Wait-RunningCommit -Url $HealthCheckUrl -ExpectedShort $shortBefore `
+            -Retries $CommitCheckRetries -IntervalSeconds $CommitCheckIntervalSeconds
+        $driftState = Get-DriftState -ExpectedShort $shortBefore -RunningShort $running
+
+        if ($driftState -eq "drift") {
+            Write-Host "::warning::本番が古いコミットで稼働しています (HEAD: $shortBefore / 稼働中: $running)。"
+            Send-DeployNotification -Title "⚠️ 本番が古いコミットのまま稼働しています" -Color $COLOR_WARNING -Lines @(
+                "作業ツリーの HEAD: ``$shortBefore``",
+                "稼働中のコミット: ``$running``",
+                "HEAD が ``origin/$Branch`` と一致しているため CD は「更新なし」で空振りしました。",
+                "**アプリの再起動が必要です**(メインツリーで手動 ``git pull`` / ``merge`` を行うと、この状態になります)。"
+            )
+            Write-DeployOutcome -Deployed $false -Status "drift" `
+                -Detail "更新なしだが稼働中コミットが HEAD と一致しない(要再起動)" -Rows @(
+                "| HEAD | ``$shortBefore`` |",
+                "| 稼働中 | ``$running`` |"
+            )
+            Record-DeployLog -RepoPath $RepositoryPath -From $shortBefore -To $shortBefore -Status "drift" -Detail "稼働中: $running"
+            exit 1
+        }
+
+        if ($driftState -eq "unknown") {
+            $healthCode = Get-HealthCode -Url $HealthCheckUrl
+            if ($null -ne $healthCode) {
+                # プロセスは応答している。再起動しても直らない(むしろ障害を隠す)ので警告のみ。
+                Write-Host "::warning::稼働中コミットを取得できませんでした (HTTP $healthCode)。プロセスは応答しています。"
+                Write-DeployOutcome -Deployed $false -Status "no-op" `
+                    -Detail "更新なし(プロセスは応答 HTTP $healthCode だが稼働中コミットを取得できず)" -Rows @(
+                    "| HEAD | ``$shortBefore`` |",
+                    "| 稼働中 | 取得不能 (HTTP $healthCode) |"
+                )
+                exit 0
+            }
+
+            Write-Host "::warning::アプリが応答しません ($HealthCheckUrl)。"
+            Send-DeployNotification -Title "🚨 アプリが応答しません" -Color $COLOR_ERROR -Lines @(
+                "``$HealthCheckUrl`` へ接続できません。",
+                "更新は無いためデプロイは行いませんでした。watchdog タスクが登録されていれば自動復旧を試みます。"
+            )
+            Write-DeployOutcome -Deployed $false -Status "down" -Detail "更新なし。アプリが応答しない"
+            Record-DeployLog -RepoPath $RepositoryPath -From $shortBefore -To $shortBefore -Status "down" -Detail "ヘルスチェック応答なし"
+            exit 1
+        }
+
+        Write-Host "更新はありません (HEAD: $before / 稼働中: $running)。" -ForegroundColor Green
+        Write-DeployOutcome -Deployed $false -Status "no-op" -Detail "更新なし(稼働中コミットは HEAD と一致)" -Rows @(
+            "| HEAD | ``$shortBefore`` |",
+            "| 稼働中 | ``$running`` |"
+        )
+        exit 0
+    }
+
+    Write-Host "更新候補を検出: $before -> $target" -ForegroundColor Yellow
+
+    $ci = "pending"
+    for ($i = 1; $i -le $CiCheckRetries; $i++) {
+        $ci = Get-CiConclusion -RepoSlug $Repo -Sha $target -CheckName $CiCheckName
+        if ($ci -ne "pending") { break }
+        if ($i -lt $CiCheckRetries) { Start-Sleep -Seconds $CiCheckIntervalSeconds }
+    }
+    if ($ci -ne "success") {
+        Write-Host "CI ステータスが success ではありません ($ci)。デプロイを見送ります。" -ForegroundColor Yellow
+        Write-DeployOutcome -Deployed $false -Status "skipped" -Detail "CI が success ではない ($ci)" -Rows @(
+            "| 対象 | ``$shortTarget`` |",
+            "| CI | ``$ci`` |"
+        )
+        exit 0
+    }
+
+    # 未コミットの変更があると、この後の merge --ff-only が
+    #   error: Your local changes to the following files would be overwritten by merge
+    # で失敗する。そして失敗を受けたロールバック(git reset --hard)が、
+    # **その未コミット変更ごと作業ツリーを巻き戻して破棄する**。
+    # 開発機と本番機が同じディレクトリの構成では、人間がエディタで直しただけでこの状態になる。
+    # デプロイが止まるうえに編集内容が消えるので、ロールバックを走らせる前にここで止める。
+    # (エラーメッセージが「ローカルが分岐している可能性」としか言わず、原因の切り分けを
+    #  誤らせるという問題もここで潰している)
+    $dirty = @(git status --porcelain --untracked-files=no) -join "`n"
+    if ($dirty.Trim()) {
+        Write-Host "作業ツリーに未コミットの変更があります。デプロイを中止します:" -ForegroundColor Yellow
+        Write-Host $dirty
+        Send-DeployNotification -Title "⚠️ デプロイ中止: 作業ツリーに未コミットの変更" -Color $COLOR_WARNING -Lines @(
+            "対象: ``$shortTarget``",
+            "未コミットの変更があるため前進していません。退避(commit / stash)してください。"
+        )
+        Write-DeployOutcome -Deployed $false -Status "blocked" -Detail "作業ツリーに未コミットの変更がある(reset --hard による破棄を避けるため中止)" -Rows @(
+            "| 対象 | ``$shortTarget`` |"
+        )
+        exit 1
+    }
+
+    $deployFailed = $false
+    $errorDetail = ""
+    $runningAfter = $null
+
+    try {
+        git merge --ff-only "origin/$Branch"
+        if ($LASTEXITCODE -ne 0) { throw "git merge --ff-only に失敗(ローカルが分岐している可能性)。" }
+
+        Invoke-DependencyInstall
+
+        if (-not (Invoke-PreDeployBackup)) { throw "デプロイ前バックアップに失敗しました。" }
+
+        Invoke-Migration
+        Restart-App
+
+        $healthy = Test-Health -Url $HealthCheckUrl -Retries $HealthCheckRetries -IntervalSeconds $HealthCheckIntervalSeconds
+        if (-not $healthy) {
+            $deployFailed = $true
+            $errorDetail = "再起動後のヘルスチェックが失敗しました。"
+        }
+        else {
+            # 200 だけでは足りない。古いプロセスが生き残っていても 200 は返る。
+            $runningAfter = Wait-RunningCommit -Url $HealthCheckUrl -ExpectedShort $shortTarget `
+                -Retries $CommitCheckRetries -IntervalSeconds $CommitCheckIntervalSeconds
+            if ($null -eq $runningAfter) {
+                Write-Host "::warning::稼働中コミットを取得できませんでした。ヘルスチェックのみで成功と判定します。"
+            }
+            elseif ($runningAfter -ne $shortTarget) {
+                $deployFailed = $true
+                $errorDetail = "再起動後も稼働中コミットが $runningAfter のままです(期待値 $shortTarget)。"
+            }
+        }
+    }
+    catch {
+        $deployFailed = $true
+        $errorDetail = "$_"
+    }
+
+    if (-not $deployFailed) {
+        Write-Host "自動デプロイが完了しました (HEAD: $target)" -ForegroundColor Green
+        Send-DeployNotification -Title "✅ デプロイ成功" -Color $COLOR_SUCCESS -Lines @("コミット: $shortBefore → $shortTarget")
+        Write-DeployOutcome -Deployed $true -Status "deployed" -Detail "$shortBefore → $shortTarget" -Rows @(
+            "| 反映前 | ``$shortBefore`` |",
+            "| 反映後 | ``$shortTarget`` |",
+            "| 稼働中 | ``$(if ($runningAfter) { $runningAfter } else { '取得不能' })`` |"
+        )
+        Record-DeployLog -RepoPath $RepositoryPath -From $shortBefore -To $shortTarget -Status "deployed" -Detail "稼働中: $runningAfter"
+        exit 0
+    }
+
+    Write-Host "デプロイに失敗しました: $errorDetail" -ForegroundColor Red
+    Write-Host "直前コミット ($shortBefore) へロールバックします..." -ForegroundColor Yellow
+
+    $rollbackOk = $false
+    try {
+        git reset --hard $before
+        Invoke-DependencyInstall
+        Restart-App
+        $rollbackOk = Test-Health -Url $HealthCheckUrl -Retries $HealthCheckRetries -IntervalSeconds $HealthCheckIntervalSeconds
+    }
+    catch {
+        $rollbackOk = $false
+    }
+
+    if ($rollbackOk) {
+        Send-DeployNotification -Title "⚠️ デプロイ失敗 → ロールバック成功" -Color $COLOR_WARNING -Lines @(
+            "失敗コミット: $shortTarget", "復帰先: $shortBefore", "原因: $errorDetail"
+        )
+        Write-DeployOutcome -Deployed $false -Status "rolled_back" -Detail $errorDetail -Rows @(
+            "| 失敗 | ``$shortTarget`` |",
+            "| 復帰先 | ``$shortBefore`` |"
+        )
+        Record-DeployLog -RepoPath $RepositoryPath -From $shortBefore -To $shortTarget -Status "rolled_back" -Detail $errorDetail
+    }
+    else {
+        Send-DeployNotification -Title "🚨 デプロイ失敗 → ロールバックも失敗" -Color $COLOR_ERROR -Lines @(
+            "失敗コミット: $shortTarget", "復帰試行先: $shortBefore", "原因: $errorDetail",
+            "手動対応が必要です。"
+        )
+        Write-DeployOutcome -Deployed $false -Status "failed" -Detail "$errorDetail (ロールバックも失敗)" -Rows @(
+            "| 失敗 | ``$shortTarget`` |",
+            "| 復帰試行先 | ``$shortBefore`` |"
+        )
+        Record-DeployLog -RepoPath $RepositoryPath -From $shortBefore -To $shortTarget -Status "failed" -Detail $errorDetail
+    }
+    exit 1
+}
+catch {
+    Write-Host "デプロイ処理で想定外のエラー: $_" -ForegroundColor Red
+    Send-DeployNotification -Title "🚨 自動デプロイでエラー" -Color $COLOR_ERROR -Lines @("原因: $_")
+    Write-DeployOutcome -Deployed $false -Status "error" -Detail "$_"
+    exit 1
+}
+finally {
+    Pop-Location
+}

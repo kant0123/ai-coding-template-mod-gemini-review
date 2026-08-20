@@ -1,0 +1,69 @@
+# [オプション] CD: self-hosted runner による自動デプロイ
+#
+# 開発機と本番機が同一マシンという構成(小規模な自宅サーバー運用など)を想定した
+# push 型デプロイ。CI(`tests`)が main への push で成功したことを契機に、
+# 本番機に常駐させた self-hosted runner 上でデプロイスクリプトを実行する。
+#
+# 【重要・既定では何もしない】
+#   本ワークフローはリポジトリ変数 `SELF_HOSTED_DEPLOY` が `true` のときだけ
+#   ジョブを実行する。runner を用意し変数を設定するまでは常にスキップされる
+#   (登録前のジョブがキューに滞留して失敗する事故を防ぐため)。
+#
+# 【安全設計】
+#   - 実デプロイは deploy/auto_deploy.ps1(deploy/auto_deploy.ps1.example を実体化したもの)
+#     に委譲する。CI 再確認・デプロイ前バックアップ・ヘルスチェック・失敗時ロールバック・
+#     通知・履歴記録はすべて ps1 側の実装に任せる。push 契機でも二重の安全網が働く。
+#   - runner が [self-hosted] ラベルでオンラインな場合のみ実行される。
+#
+# 使うには: このファイルを .github/workflows/deploy.yml にコピーし、
+# deploy/auto_deploy.ps1.example を deploy/auto_deploy.ps1 として実体化・調整し、
+# CLAUDE.md の「[オプション] 本番同居チェックアウトの追加ルール」を有効化すること。
+
+name: deploy
+
+on:
+  workflow_run:
+    workflows: ["tests"]
+    types:
+      - completed
+    # main の tests 完了時だけ起動する(ブランチ push・PR の tests では起動しない)。
+    branches:
+      - main
+
+# 同一 runner で複数デプロイが重ならないよう直列化する。
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && vars.SELF_HOSTED_DEPLOY == 'true' }}
+    runs-on: [self-hosted]
+    timeout-minutes: 20
+
+    steps:
+      # shell: pwsh (PowerShell 7) を使う。既定の powershell (Windows PowerShell 5.1) は
+      # BOM 無し UTF-8 のスクリプトを CP932 として読むため、日本語を含む .ps1 が
+      # パースエラーで 1 行も実行されずに落ちる。pwsh は BOM の有無に依存しない
+      # (.ps1 側にも BOM を付けておくこと。5.1 から手動実行する場合の保険)。
+      # pwsh が runner の実行アカウントから解決できない環境では powershell に戻す。
+      - name: 自動デプロイを実行
+        id: deploy
+        shell: pwsh
+        run: |
+          $repo = if ($env:APP_REPO_PATH) { $env:APP_REPO_PATH } else { 'C:\path\to\production\checkout' }
+          $restart = if ($env:APP_RESTART_CMD) { $env:APP_RESTART_CMD } else { '' }
+          & "$repo\deploy\auto_deploy.ps1" -RepositoryPath $repo -ServiceRestartCommand $restart
+
+      # 実デプロイだったのか no-op だったのかを実行一覧から辿れるようにする。
+      # status: deployed / no-op / skipped / drift / down / rolled_back / failed / error
+      - name: 結果を注記
+        if: always()
+        shell: pwsh
+        run: |
+          $deployed = "${{ steps.deploy.outputs.deployed }}"
+          $status = "${{ steps.deploy.outputs.status }}"
+          Write-Host "::notice::deploy result: deployed=$deployed status=$status"
