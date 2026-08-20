@@ -35,22 +35,37 @@ jobs:
       - name: シェルスクリプトの構文
         run: |
           status=0
+          count=0
           while IFS= read -r file; do
+            count=$((count + 1))
             bash -n "$file" || status=1
           done < <(find . -name '*.sh' -not -path './.git/*')
+          echo "検査した .sh: $count 件"
+          # 0 件で成功すると「通っているのに何も見ていない」状態に黙って落ちる。
+          if [ "$count" -eq 0 ]; then
+            echo "::error::検査対象の .sh が 1 件も見つからない(パスか除外条件が壊れている)"
+            status=1
+          fi
           exit $status
 
       - name: PowerShell の構文
         shell: pwsh
         run: |
           $failed = $false
-          Get-ChildItem -Recurse -File -Include *.ps1, *.ps1.example | ForEach-Object {
+          $files = @(Get-ChildItem -Recurse -File -Include *.ps1, *.ps1.example)
+          Write-Host "検査した PowerShell: $($files.Count) 件"
+          # 0 件で成功すると「通っているのに何も見ていない」状態に黙って落ちる。
+          if ($files.Count -lt 1) {
+            Write-Host "::error::検査対象の .ps1 が 1 件も見つからない(パスか除外条件が壊れている)"
+            exit 1
+          }
+          foreach ($file in $files) {
             $errors = $null
             # .example は拡張子が .ps1 でないため、内容を読んでパースする
-            $text = Get-Content -LiteralPath $_.FullName -Raw
+            $text = Get-Content -LiteralPath $file.FullName -Raw
             [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) {
-              Write-Host "::error file=$($_.FullName)::PowerShell パースエラー $($errors.Count) 件"
+              Write-Host "::error file=$($file.FullName)::PowerShell パースエラー $($errors.Count) 件"
               $failed = $true
             }
           }
@@ -62,10 +77,16 @@ jobs:
           # BOM が無いと Windows PowerShell 5.1 が CP932 として読み、日本語が化けて
           # スクリプトが 1 行も実行されずパースエラーで落ちる。テンプレート自身の規約。
           $failed = $false
-          Get-ChildItem -Recurse -File -Include *.ps1, *.ps1.example | ForEach-Object {
-            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)[0..2]
+          $files = @(Get-ChildItem -Recurse -File -Include *.ps1, *.ps1.example)
+          Write-Host "BOM を確認した PowerShell: $($files.Count) 件"
+          if ($files.Count -lt 1) {
+            Write-Host "::error::検査対象の .ps1 が 1 件も見つからない(パスか除外条件が壊れている)"
+            exit 1
+          }
+          foreach ($file in $files) {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)[0..2]
             if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
-              Write-Host "::error file=$($_.FullName)::UTF-8 BOM が無い"
+              Write-Host "::error file=$($file.FullName)::UTF-8 BOM が無い"
               $failed = $true
             }
           }
