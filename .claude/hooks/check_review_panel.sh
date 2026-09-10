@@ -59,7 +59,7 @@ fi
 fail() {
     echo "合議制パネル: $1" >&2
     echo "パネルを実行できないため、マージを差し止めました。原因を解消して再実行してください。" >&2
-    echo "意図的に飛ばす場合は、理由を PR 本文に一行書いた上で PANEL_SKIP=1 を付けて再実行してください。" >&2
+    echo "パネルを意図的に飛ばす場合は、理由を PR 本文に一行書いた上で PANEL_SKIP=1 を付けて再実行してください。" >&2
     exit 2
 }
 
@@ -75,10 +75,15 @@ diff_file=$(mktemp) || fail "一時ファイルを作成できませんでした
 json_file=$(mktemp) || fail "一時ファイルを作成できませんでした。"
 trap 'rm -f "$diff_file" "$json_file"' EXIT
 
-# レポートは残す。差し止めのメッセージで場所を案内するため、hook 終了後も読めないと困る。
-# review/work/ は .gitignore 済み。
-report_file="$repo_root/review/work/pr_${pr}_review.md"
-mkdir -p "$repo_root/review/work" 2>/dev/null || report_file=$(mktemp)
+# レポートは消さずに残す。差し止めメッセージで場所を案内するため、hook 終了後に
+# 読めないと意味がない。review/work/ は .gitignore 済み。
+# review/ が無いプロジェクト (パネルを別の場所に置いている場合) には作らない —
+# パネルは監査対象リポジトリを変更しない。
+if [[ -d "$repo_root/review" ]] && mkdir -p "$repo_root/review/work" 2>/dev/null; then
+    report_file="$repo_root/review/work/pr_${pr}_review.md"
+else
+    report_file=$(mktemp)
+fi
 
 # gh pr diff を使う。worktree の未コミット変更に影響されず、マージされる状態と一致するため。
 gh pr diff "$pr" > "$diff_file" 2>/dev/null || fail "PR #$pr の差分を取得できませんでした。"
@@ -108,10 +113,10 @@ def render(items):
 
 
 if t["critical_count"]:
-    print(f"合議制パネルが Critical を {t['critical_count']} 件検出したため、マージを差し止めました。")
+    print(f"合議制パネルが CRITICAL を {t['critical_count']} 件検出したため、マージを差し止めました。")
     render(t["criticals"])
     if t["warning_count"]:
-        print(f"あわせて Warning が {t['warning_count']} 件あります (こちらはマージを止めません)。")
+        print(f"あわせて WARNING が {t['warning_count']} 件あります（こちらはマージを止めません）。")
         render(t["warnings"])
     print(f"詳細レポート: {report}")
     print("")
@@ -126,7 +131,7 @@ if t["critical_count"]:
     sys.exit(2)
 
 if t["warning_count"]:
-    print(f"合議制パネル: Warning {t['warning_count']} 件 (マージは止めません)。")
+    print(f"合議制パネル: WARNING {t['warning_count']} 件（マージは止めません）。")
     render(t["warnings"])
     print(f"詳細レポート: {report}")
     print("今の PR で直すか、起票して先に進むか、見送るかを判断してください。")
