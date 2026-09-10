@@ -42,6 +42,16 @@ jobs:
         with:
           python-version: '3.12'
 
+      # 検出ルールの回帰テスト。**偽陽性ガードを含む**ため、パネル本体より先に走らせる。
+      # tests ワークフローに相乗りさせないのはこのジョブ全体と同じ理由(CD が CI の
+      # conclusion を待つ構成で、レビュー側の都合が本番デプロイを止めないため)。
+      # test.yml は requirements.txt / pyproject.toml が無いとテストを実行しないので、
+      # ここに置かないと review/tests は誰にも走らせてもらえない。
+      - name: 検出ルールの回帰テスト
+        run: |
+          pip install pytest
+          python -m pytest review/tests -q
+
       - name: 差分を切り出す
         id: diff
         env:
