@@ -1,0 +1,73 @@
+{
+  "fintech": {
+    "name": "金融・暗号資産・高頻度取引 (FinTech / Quant & Crypto)",
+    "standards": [
+      "ISO 20022",
+      "IEEE 754",
+      "Double Spending Prevention"
+    ],
+    "critical_rules": [
+      "浮動小数点数 (float / double) の金銭計算・金利・手数料への使用を絶対禁止 (decimal.Decimal 必須)",
+      "Banker's Rounding (ROUND_HALF_EVEN) または規格で定められた端数処理の明示",
+      "残高確認から引き落としまでの TOCTOU (Time-of-Check to Time-of-Use) 競合の排除（排他ロック必須）",
+      "市場レート更新のタイムスタンプ逆転許容による Stale Price Arbitrage の防止"
+    ]
+  },
+  "distributed": {
+    "name": "分散システム・イベント駆動 (Distributed Systems & Messaging)",
+    "standards": [
+      "Transactional Outbox",
+      "Exactly-Once Semantics",
+      "Distributed Locking"
+    ],
+    "critical_rules": [
+      "DBコミットとメッセージブローカー(Kafka/RabbitMQ)送信の Dual-Write 分離禁止 (Transactional Outbox パターン必須)",
+      "分散ロックのトランザクション完了前早期解放の禁止 (並行二重決済防止)",
+      "Outboxポーラーにおけるワーカー重複取得防止 (FOR UPDATE SKIP LOCKED の使用)",
+      "冪等性キー (Idempotency Key) による重複リクエスト耐性の担保"
+    ]
+  },
+  "healthcare": {
+    "name": "医療・臨床安全・ヘルスケア (Healthcare & Clinical Safety)",
+    "standards": [
+      "FDA Class I Safety",
+      "ASHP Guidelines",
+      "HIPAA"
+    ],
+    "critical_rules": [
+      "検査値単位 (Unit of Measure: mg/dL vs µmol/L) の型安全な厳密検証 (暗黙変換・未換算の絶対禁止)",
+      "安全投与量上限リミッターの例外握りつぶし禁止 (異常検知時は即時停止・フェイルセーフ)",
+      "血中濃度採血窓における単方向検証 (投与直前トラフ値とピーク濃度の混同防止)",
+      "小児・腎機能低下患者の極限体重・GFR値に対する境界値防御"
+    ]
+  },
+  "embedded": {
+    "name": "組込み・産業IoT・車載RTOS (Embedded & Industrial Robotics)",
+    "standards": [
+      "ISO 26262 ASIL-D",
+      "MISRA C:2012",
+      "POSIX Realtime"
+    ],
+    "critical_rules": [
+      "CANバスフレームのエンディアン厳密性 (Motorola Big-Endian vs Intel Little-Endian の逆転防止)",
+      "割込みサービスルーチン (ISR) 内でのブロッキングMutex取得・動的メモリ確保 (malloc) の絶対禁止",
+      "32bitシステムティックタイマーのラップアラウンド (約49.7日問題) に対する符号なし減算の徹底",
+      "ハードウェア緊急停止 (Fail-Safe) ラインのソフトウェア制御バイパス防止"
+    ]
+  },
+  "general": {
+    "name": "一般的なWeb・バックエンドシステム (General Web / Backend)",
+    "standards": [
+      "OWASP Top 10",
+      "Clean Architecture",
+      "REST Best Practices"
+    ],
+    "critical_rules": [
+      "Timing Attack 脆弱性の排除 (秘密情報・ハッシュ比較における hmac.compare_digest の使用)",
+      "認可漏れ・IDOR (他者リソースへの不正アクセス) の完全防止",
+      "ループ内SQL実行 (N+1クエリ) の排除とバルク一括取得の徹底",
+      "既存DBを破壊する無保護な NOT NULL カラム追加の禁止 (安全なデフォルト値または段階マイグレーション)",
+      "既存テストの改ざん・無力化 (@pytest.mark.skip / コメントアウト) の絶対禁止"
+    ]
+  }
+}

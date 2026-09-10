@@ -210,6 +210,7 @@ Wiki は**現状の記録**であって、これから作るものの仕様書�
 | --- | --- |
 | 着手 — Wiki を読む / Issue を確保する / worktree を切る | `worktree-start` |
 | 実装後 — 変更を `wiki/` に反映する | `wiki-ingest` |
+| push 前 — 差分を合議制パネルで監査する [オプション] | `multi-expert-review` |
 | 完了 — PR 作成 / CI / マージ / 後始末 / デプロイ確認 | `pr-finish` |
 
 スキルの実体は `.agent/skills/<name>/SKILL.md`(Claude Code で使うなら
@@ -408,6 +409,37 @@ gh issue create --label bug --title "<一文で症状>" --body "<本文>"
   (「スコープ外の問題を発見したとき」を参照。1 件も無ければ、それ自体を確認済みとする。
   Issue 連携を採用しない場合はこの行を削除する)。
 - 変更内容の要約と手動確認結果を報告している。起票した Issue があれば番号を挙げている。
+- **合議制レビューを採用している場合、push 前にパネルを通し、判定を PR 本文に書いている**
+  (静的プレスキャナだけで済ませていない。採用しない場合はこの行を削除する)。
+
+## [オプション] 合議制レビュー (Multi-Expert Review Panel)
+
+PR をマージする前に、5 名の専門家ロール(Security / Architecture / Domain Invariants /
+QA / Lead Triage)で差分を監査し、Lead Reviewer が合議・トリアージする仕組み。
+採用しない場合、この節と `review/`、`.agent/skills/multi-expert-review/`、
+`.github/workflows/multi-expert-review.yml` をまとめて削除する。
+
+手順は `multi-expert-review` スキル、仕組みの説明は `review/README.md` にある。
+ここに書くのは、スキルが発火しなかった場合でも守られている必要がある不変条件だけ。
+
+- **段 1(静的プレスキャナ)の APPROVE を「レビュー済み」と読まない。**
+  `review/panel_runner.py` は LLM を呼ばず、正規表現で定型パターンを見ているだけ。
+  文脈依存の欠陥(認可の抜け、ドメイン不変条件の破綻)は原理的に見えない。
+  **本命は段 2** — `review/prompts/` の 5 プロンプトをエージェントが実行する監査。
+  CI が緑でも段 2 を省略しない。
+- **Critical があるまま push しない。** 直してから段 1 に戻る。
+- **Warning を今の PR で直さないなら、その場で Issue に起票する。**
+  チャットに書いただけでは記録に残らず失われる(「スコープ外の問題を発見したとき」と同じ)。
+- **指摘は 3 原則に従って書く。** ①実害の機序を書けない指摘は出さない(偽陽性の排除)
+  ②開発者を非難する表現を使わない(心理的安全性)③そのまま適用できる修正コードを添える。
+- **レポートをコミットしない。** `review/work/` は生成物で `.gitignore` 対象。
+  残す価値のある知見は `wiki/` に還元する(レポートそのものを貼らない)。
+- **CI ワークフローをテストのワークフローに相乗りさせない。** `deploy.yml` を採用している
+  場合、CD は `workflow_run` で CI の conclusion を待つため、レビュー指摘 1 件で本番デプロイ
+  まで止まる(`wiki-lint` を分けているのと同じ理由)。
+
+対象ドメインはリポジトリ変数 `REVIEW_DOMAIN` で指定する
+(`general` / `fintech` / `distributed` / `healthcare` / `embedded`。未設定なら `general`)。
 
 ## プロジェクト固有ルール [記入]
 

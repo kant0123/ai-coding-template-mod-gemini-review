@@ -23,10 +23,12 @@ flowchart TD
     issue["Issue 起票<br/>(仕様・受け入れ基準はここに書く)"]
     worktree["worktree で実装<br/>(着手前に wiki/index.md を読む = Query)"]
     wikiUpdate["wiki/ 更新を同じブランチにコミット (Ingest)"]
+    panel["合議制パネルで差分を監査 (オプション)<br/>Critical があればここで直す"]
     push["git push -u origin &lt;branch&gt;"]
     pr["PR 作成"]
     prTests["tests (CI) が PR に対して走る"]
     wikiCheck["wiki-check (オプション) が PR に対して走る"]
+    reviewCI["multi-expert-review (オプション) が PR に対して走る<br/>= 静的プレスキャナの再実行"]
     gate{"CI 緑?"}
     merge["gh pr merge --merge<br/>(エージェントの仕事はここまで)"]
     mainCommit["main に merge commit"]
@@ -35,11 +37,13 @@ flowchart TD
     deploySuccess{"success?"}
     deploy["deploy (CD, オプション)"]
 
-    issue --> worktree --> wikiUpdate --> push --> pr
+    issue --> worktree --> wikiUpdate --> panel --> push --> pr
     pr --> prTests
     pr -.オプション.-> wikiCheck
+    pr -.オプション.-> reviewCI
     prTests --> gate
     wikiCheck -.-> gate
+    reviewCI -.-> gate
     gate -->|Yes| merge --> mainCommit --> mainPush --> mainTests --> deploySuccess
     deploySuccess -->|success| deploy
     gate -->|No| worktree
@@ -55,6 +59,7 @@ flowchart TD
 | --- | --- | --- |
 | 着手 | `worktree-start` | Wiki を読む → Issue 確保 → `origin/main` から worktree |
 | 実装後 | `wiki-ingest` | 影響ページの更新 → `log.md` 追記 → wiki-lint |
+| push 前 | `multi-expert-review`(オプション) | 差分を 5 ロールで監査 → Critical を潰す → 判定を PR 本文へ |
 | 完了 | `pr-finish` | push → PR → CI → マージ → 後始末 → Issue クローズ → 反映確認 |
 
 ### 1. 開始 — worktree を作る
@@ -213,6 +218,27 @@ Wiki 更新が不要な PR には `wiki:skip` ラベルを付ける。
   何も見ていない状態になる)。
 - ローカルでは `node scripts/wiki-lint.js`。**コミットしてから**走らせる(未コミットだと
   `updated` が古いと言われる)。
+
+### `multi-expert-review`(オプション・既定で有効)
+
+[.github/workflows/multi-expert-review.yml](../.github/workflows/multi-expert-review.yml)
+
+PR の差分に合議制レビューの**静的プレスキャナ**(`review/panel_runner.py`)を掛け、
+結果を PR コメントに投稿する。Critical があればジョブが失敗してマージをブロックする。
+仕組みの全体像は [review/README.md](../review/README.md)。
+
+- **これが緑でも「レビュー済み」ではない。** プレスキャナは LLM を呼ばず、正規表現で
+  定型パターン(金銭計算の float、`@pytest.mark.skip`、無防備な NOT NULL など)を
+  見ているだけで、認可の抜けやドメイン不変条件の破綻は原理的に見えない。
+  **本命はエージェントが `review/prompts/` の 5 プロンプトを実行する段 2** で、
+  CI はこれを肩代わりしない。
+- 対象ドメインはリポジトリ変数 `REVIEW_DOMAIN` で切り替える
+  (`general` / `fintech` / `distributed` / `healthcare` / `embedded`)。未設定なら `general`。
+- 誤検知で落ちたら `review:skip` ラベルで外し、**なぜ誤検知なのかを PR 本文に書く**。
+- **`tests` に相乗りさせない。** wiki-lint と同じ理由 — CD(方式 B)が
+  `workflow_run` で CI の conclusion を待つため、レビュー指摘 1 件で本番デプロイが止まる。
+- `fetch-depth: 0` が要る。base と head の merge-base から差分を取るため、浅いクローンでは
+  差分が空になり、**何も検査せずに通る**(0 バイトのときは警告を出すようにしてある)。
 
 ### `label-hygiene`(オプション)
 

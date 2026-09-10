@@ -1,0 +1,113 @@
+name: multi-expert-review
+
+# [オプション] 合議制専門家パネルの静的プレスキャナ (review/panel_runner.py) を
+# PR ごとに回し、結果を PR コメントに投稿する。Critical があればジョブを失敗させる。
+#
+# 【このジョブが見ているものの限界】
+# panel_runner.py は LLM を呼ばない。正規表現・部分文字列による定型パターン検査で、
+# 文脈依存の欠陥(認可の抜け、ドメイン不変条件の破綻)は原理的に見えない。
+# **このジョブが success でも「レビュー済み」ではない。** 本命はエージェントが
+# review/prompts/ の 5 プロンプトを実行する multi-expert-review スキル側。
+#
+# 【テストのワークフローに相乗りさせない理由】
+# self-hosted CD (deploy.yml) は workflow_run で CI ワークフローの conclusion が
+# success になるのを待つ。テストのワークフローにこのジョブを足すと、レビュー指摘 1 件で
+# 本番デプロイまで止まる。wiki-lint.yml を分けているのと同じ理由。
+#
+# 採用しない場合はこのファイルを削除する(review/ ごと消してよい)。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  panel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: "!contains(github.event.pull_request.labels.*.name, 'review:skip')"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # base...head の差分を取るため、両方の履歴が要る。
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 差分を切り出す
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p review/work
+          # 3 点ではなく明示的な merge-base を使う。base.sha は PR 作成時点の main の先端で、
+          # その後 main が進んでいると 2 点差分に他人のコミットが混ざる。
+          base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          git diff "$base" "$HEAD_SHA" > review/work/diff.patch
+          bytes=$(wc -c < review/work/diff.patch)
+          echo "差分サイズ: ${bytes} bytes"
+          echo "bytes=${bytes}" >> "$GITHUB_OUTPUT"
+
+      - name: パネルを実行する
+        if: steps.diff.outputs.bytes != '0'
+        id: panel
+        env:
+          # プロジェクトの既定ドメイン。リポジトリ変数 REVIEW_DOMAIN で上書きする
+          # (general / fintech / distributed / healthcare / embedded)。
+          REVIEW_DOMAIN: ${{ vars.REVIEW_DOMAIN || 'general' }}
+        run: |
+          set +e
+          python review/panel_runner.py \
+            --diff review/work/diff.patch \
+            --domain "$REVIEW_DOMAIN" \
+            --task-id "pr-${{ github.event.pull_request.number }}" \
+            --output review/work/report.md \
+            --fail-on-critical
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: レポートを job summary に出す
+        if: steps.diff.outputs.bytes != '0'
+        run: cat review/work/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: レポートを PR コメントに投稿する
+        if: steps.diff.outputs.bytes != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # 同じコメントを毎 push で積み上げないよう、目印で既存コメントを探して編集する。
+          marker='<!-- multi-expert-review -->'
+          { echo "$marker"; cat review/work/report.md; } > review/work/comment.md
+
+          existing=$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))] | .[0].id // empty")
+
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/${existing}" \
+              -F body=@review/work/comment.md > /dev/null
+            echo "既存コメント ${existing} を更新しました。"
+          else
+            gh pr comment "$PR" --body-file review/work/comment.md
+          fi
+
+      - name: 判定を反映する
+        if: steps.diff.outputs.bytes != '0'
+        run: |
+          if [ "${{ steps.panel.outputs.exit_code }}" != "0" ]; then
+            echo "::error::Critical 指摘があります。PR コメントの修正パッチを適用してください。誤検知であれば 'review:skip' ラベルを付け、理由を PR 本文に書いてください。"
+            exit 1
+          fi
+          echo "::notice::静的プレスキャナは Critical を検出しませんでした。これは「レビュー済み」を意味しません — multi-expert-review スキルで本監査を行ってください。"
+
+      - name: 差分が空だった場合
+        if: steps.diff.outputs.bytes == '0'
+        run: echo "::warning::差分が 0 バイトでした。base/head の指定か fetch-depth を確認してください(検査は行われていません)。"

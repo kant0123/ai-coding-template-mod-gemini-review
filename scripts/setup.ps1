@@ -132,6 +132,27 @@ if ($wikiLintChoice -eq "y") {
     }
 }
 
+# --- 合議制レビュー ---
+Write-Host ""
+$reviewChoice = Ask "合議制レビュー(PR ごとに 5 ロールで差分を監査)を使いますか? (y/n)" "y"
+if ($reviewChoice -eq "y") {
+    Write-Host "  -> review/ と multi-expert-review スキルを維持します。"
+    Write-Host "     既定ドメインはリポジトリ変数 REVIEW_DOMAIN で指定します"
+    Write-Host "     (general / fintech / distributed / healthcare / embedded。未設定なら general)。"
+    Write-Host "     PR ごとに .github/workflows/multi-expert-review.yml が静的プレスキャナを回します。"
+    Write-Host "     これは足切りで、本監査はエージェントが review/prompts/ を実行する側です。"
+} else {
+    foreach ($p in @("review", ".agent/skills/multi-expert-review", ".claude/skills/multi-expert-review")) {
+        if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+    }
+    if (Test-Path ".github/workflows/multi-expert-review.yml") {
+        Remove-Item -Force ".github/workflows/multi-expert-review.yml"
+    }
+    Write-Host "  -> review/ ・スキル・ワークフローを削除しました。"
+    Write-Host "     CLAUDE.md の「[オプション] 合議制レビュー」節と、pr-finish スキルの"
+    Write-Host "     「0. レビューパネルを通す」手順も削除してください。"
+}
+
 # --- ナレッジ Wiki ---
 Write-Host ""
 $wikiChoice = Ask "ナレッジ Wiki(wiki/)を使いますか? (y/n)" "y"

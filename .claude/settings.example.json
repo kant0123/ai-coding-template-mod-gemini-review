@@ -6,7 +6,9 @@
       "Bash(git status)",
       "Bash(git diff *)",
       "Bash(git log *)",
-      "Bash(python -m pytest *)"
+      "Bash(python -m pytest *)",
+      "Bash(python review/panel_runner.py *)",
+      "Bash(node scripts/wiki-lint.js *)"
     ]
   },
 

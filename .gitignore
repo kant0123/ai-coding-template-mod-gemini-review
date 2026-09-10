@@ -3,3 +3,7 @@
 __pycache__/
 *.pyc
 .env
+
+# 合議制レビューの中間成果物(生成物なのでコミットしない)
+review/work/*
+!review/work/.gitkeep

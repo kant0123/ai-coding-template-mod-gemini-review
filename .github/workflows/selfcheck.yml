@@ -48,6 +48,37 @@ jobs:
           fi
           exit $status
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python の構文
+        run: |
+          count=$(find . -name '*.py' -not -path './.git/*' | wc -l)
+          echo "検査した .py: $count 件"
+          # 0 件で成功すると「通っているのに何も見ていない」状態に黙って落ちる。
+          if [ "$count" -eq 0 ]; then
+            echo "::error::検査対象の .py が 1 件も見つからない(パスか除外条件が壊れている)"
+            exit 1
+          fi
+          find . -name '*.py' -not -path './.git/*' -print0 | xargs -0 python -m py_compile
+
+      - name: 合議制レビューのプレスキャナが実際に検出するか
+        run: |
+          # 収録しているサンプルには既知の Critical が仕込んである。
+          # 「実行はできるが何も検出しない」状態で配られるのを防ぐための煙試験。
+          set +e
+          python review/panel_runner.py \
+            --target review/examples/sample_target.py \
+            --domain fintech --task-id selfcheck --fail-on-critical
+          code=$?
+          if [ "$code" -eq 0 ]; then
+            echo "::error::既知の欠陥を含むサンプルで Critical が 0 件だった(検出ロジックが壊れている)"
+            exit 1
+          fi
+          echo "サンプルの既知欠陥を検出した (exit=$code)。"
+
       - name: PowerShell の構文
         shell: pwsh
         run: |

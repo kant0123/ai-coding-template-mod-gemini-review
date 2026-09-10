@@ -32,6 +32,28 @@ git status
 - スキーマ変更があるなら、マイグレーションが含まれていて既存 DB がそのまま起動できることを確認する。
 - フロントを触ったなら実際に起動してブラウザで動作確認する。
 
+## 0. レビューパネルを通す(合議制レビューを採用している場合)
+
+**push する前に** `multi-expert-review` スキルで差分を監査する。詳しい手順はそちらにある。
+
+```bash
+git diff origin/main...HEAD > review/work/diff.patch
+python review/panel_runner.py --diff review/work/diff.patch --domain <domain>
+```
+
+これは静的プレスキャナ(段 1)で、**通っても「レビュー済み」ではない。**
+続けて `review/prompts/` の 5 プロンプトによる本監査(段 2)まで行う。
+
+- 🚨 Critical があれば **push しない。**直してから段 1 に戻る。
+- ⚠️ Warning を今の PR で直さないなら、その場で Issue に起票する
+  (`CLAUDE.md`「スコープ外の問題を発見したとき」)。
+- 結果は PR 本文の「レビューパネル」節に書く(次の手順のテンプレート)。
+
+push 後は CI (`multi-expert-review.yml`) が段 1 を自動で回して PR にコメントする。
+ローカルで先に回しておくのは、CI の失敗を待たずに潰すため。
+
+合議制レビューを採用していない場合はこの手順ごと削除する。
+
 ## 1. push
 
 ```bash
@@ -59,6 +81,12 @@ gh pr create --title "<一文>" --body "<下記テンプレート>"
 ## Wiki
 
 <更新したページ、または更新不要と判断した理由を一行>
+
+## レビューパネル
+
+- ドメイン: `<general / fintech / distributed / healthcare / embedded>`
+- 判定: <APPROVE / COMMENT / REQUEST_CHANGES>
+- 対応: <Critical を N 件修正 / Warning を #45 に起票 / 指摘なし>
 ```
 
 - **`Fixes #<番号>` / `Closes #<番号>` を書かない。** クロージングキーワードがあると

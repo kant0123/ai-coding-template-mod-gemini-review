@@ -15,9 +15,14 @@
 `wiki-check` と `wiki-lint` は役割が違うので併用できる。前者は「**Ingest したか**」
 (PR に `wiki/` の更新が含まれるか)、後者は「**Wiki の中身が整合しているか**」を見る。
 
-**`wiki-lint` をテストのワークフローに相乗りさせないこと。** `deploy.yml` を採用している場合、
-CD は `workflow_run` で CI ワークフロー全体の conclusion が success になるのを待つため、
-相乗りさせると Wiki の不整合 1 件で本番デプロイまで止まる。
+合議制レビュー (`multi-expert-review.yml`) はここではなく **`.github/workflows/` に既定で
+置いてある**(PR ごとに走る)。不要なら `review/` ごと削除する — 手順は
+[review/README.md](../../review/README.md)。
+
+**`wiki-lint` と `multi-expert-review` をテストのワークフローに相乗りさせないこと。**
+`deploy.yml` を採用している場合、CD は `workflow_run` で CI ワークフロー全体の conclusion が
+success になるのを待つため、相乗りさせると Wiki の不整合やレビュー指摘 1 件で
+本番デプロイまで止まる。
 
 導入手順の詳細は [docs/development_workflow.md](../../docs/development_workflow.md) の
 「CI/CD の選択」を参照。

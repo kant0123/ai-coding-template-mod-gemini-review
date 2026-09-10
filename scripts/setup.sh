@@ -135,6 +135,23 @@ if [[ "$wikilint_choice" == "y" ]]; then
     fi
 fi
 
+# --- 合議制レビュー ---
+echo ""
+review_choice=$(ask "合議制レビュー(PR ごとに 5 ロールで差分を監査)を使いますか? (y/n)" "y")
+if [[ "$review_choice" == "y" ]]; then
+    echo "  -> review/ と multi-expert-review スキルを維持します。"
+    echo "     既定ドメインはリポジトリ変数 REVIEW_DOMAIN で指定します"
+    echo "     (general / fintech / distributed / healthcare / embedded。未設定なら general)。"
+    echo "     PR ごとに .github/workflows/multi-expert-review.yml が静的プレスキャナを回します。"
+    echo "     これは足切りで、本監査はエージェントが review/prompts/ を実行する側です。"
+else
+    rm -rf review .agent/skills/multi-expert-review .claude/skills/multi-expert-review
+    rm -f .github/workflows/multi-expert-review.yml
+    echo "  -> review/ ・スキル・ワークフローを削除しました。"
+    echo "     CLAUDE.md の「[オプション] 合議制レビュー」節と、pr-finish スキルの"
+    echo "     「0. レビューパネルを通す」手順も削除してください。"
+fi
+
 # --- ナレッジ Wiki ---
 echo ""
 wiki_choice=$(ask "ナレッジ Wiki(wiki/)を使いますか? (y/n)" "y")
