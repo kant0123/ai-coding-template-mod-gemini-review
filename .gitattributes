@@ -7,3 +7,8 @@
 # BOM はファイルの中身なので git がそのまま保持する。
 *.ps1 text eol=crlf
 *.ps1.example text eol=crlf
+
+# .sh は LF で固定する。core.autocrlf=true の Windows でチェックアウトすると CRLF になり、
+# bash が行末の \r ごと解釈して `$'\r': command not found` で落ちる。hook の失敗は
+# 画面に出ないことがあるため、壊れていることに気づけないまま素通しになる。
+*.sh text eol=lf

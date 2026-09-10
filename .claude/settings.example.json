@@ -23,6 +23,16 @@
             "command": "bash .claude/hooks/check_wiki_updated.sh"
           }
         ]
+      },
+      {
+        "_comment": "[オプション] gh pr merge 前に合議制パネルを掛け、Critical があればマージを差し止める。ブランチ保護の代わりではなく多層防御 (docs/development_workflow.md 「ブランチ保護」参照)。review/ を採用しないなら削除。",
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check_review_panel.sh"
+          }
+        ]
       }
     ]
   }
