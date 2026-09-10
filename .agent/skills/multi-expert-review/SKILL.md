@@ -52,8 +52,14 @@ python review/panel_runner.py --diff review/work/diff.patch --domain <domain> --
 (決済まわりを触ったなら `fintech` 等)。
 
 出力された `review/work/pr-local/final_consensus_review.md` を読む。
-**`読み込んだ文字数` が 0 なら差分の切り出しに失敗している** — APPROVE を信用せず、
-パスとブランチを確認してやり直す。
+
+検査するのは `.py` `.c` `.h` `.ts` `.js` `.sql` のみで、`review/` 配下は既定で除外される
+(散文やパネル自身のプロンプトには検出したいパターンが説明として書いてあり、
+含めると必ず誤検知になる)。`--exclude <glob>` で足せる。
+
+**`読み込んだ文字数` が 0 のときは理由を読む。** 「ドキュメントのみの変更」なら正常。
+「対象が空」なら差分の切り出しに失敗しているので、APPROVE を信用せずパスとブランチを
+確認してやり直す。
 
 ## 3. 段 2 — 専門家パネルを実行する
 

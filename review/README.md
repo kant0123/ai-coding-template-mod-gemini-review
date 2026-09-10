@@ -81,9 +81,24 @@ python review/panel_runner.py --target src/payments --domain fintech
 | `--work-dir <path>` | 中間成果物の出力先。既定 `review/work/<task_id>` |
 | `--output <path>` | 最終レポートの出力先 |
 | `--fail-on-critical` | Critical が 1 件でもあれば exit 1(CI 用。既定では落とさない) |
+| `--exclude <glob>` | 検査対象から外すパス(繰り返し可)。既定の除外に追加される |
 
 `--fail-on-critical` を既定にしていないのは、静的パターン検査が誤検知しうるため。
 落とすかどうかは CI 側で明示的に選ばせる。
+
+### 何を検査しないか
+
+- **散文を検査しない。** 検査するのは `.py` `.c` `.h` `.ts` `.js` `.sql` だけ。
+  README・SKILL.md・CLAUDE.md は「`@pytest.mark.skip` を使うな」「ISR 内で Mutex を
+  取るな」とパターンそのものを引用して説明するため、含めると必ず誤検知になる。
+- **`review/` 配下を検査しない**(既定の除外)。同じ理由で、パネル自身のプロンプトと
+  不変条件定義には検出したいパターンが説明として書いてある。
+  ただし**ファイルを名指しした場合は除外を適用しない** — `review/examples/sample_target.py`
+  を意図して見せる selfcheck の煙試験がこれに当たる。
+
+検査対象が 0 件になった場合、レポートに理由が出る。「ドキュメントのみの変更」なら正常、
+「対象が空」ならパスか差分の抽出条件が壊れている。**どちらにせよ APPROVE は
+「問題が無い」を意味しない。**
 
 ## 出力 — コンテキスト隔離
 

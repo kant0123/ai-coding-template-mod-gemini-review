@@ -20,11 +20,49 @@ import os
 import sys
 import json
 import re
+import fnmatch
 import argparse
 from datetime import datetime
 from pathlib import Path
 
 PANEL_ROOT = Path(__file__).resolve().parent
+
+# 既定の除外パス。パネル自身のプロンプト・不変条件定義・フィクスチャには、
+# 検出したいパターン(ハードコードされた鍵、@pytest.mark.skip、ISR 内 Mutex 等)が
+# **説明のために書いてある**。除外しないと review/ を触る PR が必ず全件誤検知で落ちる。
+DEFAULT_EXCLUDES = ["review/*"]
+
+# 検査するファイル種別。**散文を検査対象にしない**のが要点で、README・SKILL.md・
+# CLAUDE.md は「@pytest.mark.skip を使うな」「ISR 内で Mutex を取るな」と
+# パターンそのものを引用して説明するため、含めると必ず誤検知になる。
+# 検査ロジック自体も Python / SQL 前提で書かれている。
+CODE_SUFFIXES = (".py", ".c", ".h", ".ts", ".js", ".sql")
+
+
+def is_excluded(path: str, patterns: list) -> bool:
+    normalized = path.replace("\\", "/").lstrip("./")
+    return any(fnmatch.fnmatch(normalized, pat) for pat in patterns)
+
+
+def filter_diff(patch_text: str, patterns: list) -> tuple:
+    """patch をファイル単位に割り、除外パターンに当たるものを落とす。
+
+    戻り値: (残した patch テキスト, 落としたパス一覧)
+    """
+    sections = re.split(r'(?m)^(?=diff --git )', patch_text)
+    kept, dropped = [], []
+    for section in sections:
+        if not section.strip():
+            continue
+        m = re.match(r'diff --git a/(\S+) b/(\S+)', section)
+        # ヘッダを読めなかった塊は落とさない(落として黙って見落とすより、
+        # 誤検知のほうが気付ける)。
+        path = m.group(2) if m else None
+        if path and (is_excluded(path, patterns) or not path.endswith(CODE_SUFFIXES)):
+            dropped.append(path)
+            continue
+        kept.append(section)
+    return "".join(kept), dropped
 
 def load_domain_invariants(domain: str) -> dict:
     config_path = PANEL_ROOT / "configs" / "domain_invariants.json"
@@ -225,7 +263,7 @@ def lead_reviewer_triage(all_findings: list) -> dict:
         "nitpicks": nitpicks
     }
 
-def generate_markdown_report(task_id: str, domain: str, target: str, triage: dict, scanned_chars: int = 0) -> str:
+def generate_markdown_report(task_id: str, domain: str, target: str, triage: dict, scanned_chars: int = 0, empty_reason: str = "") -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = []
     lines.append(f"# 合議制専門家パネル コード監査＆トリアージレポート")
@@ -238,8 +276,14 @@ def generate_markdown_report(task_id: str, domain: str, target: str, triage: dic
     lines.append("")
     if scanned_chars == 0:
         # 0 文字で APPROVE すると「通っているのに何も見ていない」状態に黙って落ちる。
-        lines.append("> ⚠️ **対象が空です。** パスまたは差分の抽出条件が壊れている可能性があります。")
-        lines.append("> この APPROVE は「問題が無い」ことを意味しません。")
+        # 何も見ていない理由は必ず書く(正常なケースと異常なケースがあるため)。
+        if empty_reason == "filtered":
+            lines.append("> ℹ️ **検査対象のコードファイルが含まれていませんでした**"
+                         f"(検査するのは {', '.join(CODE_SUFFIXES)} のみ)。")
+            lines.append("> ドキュメントのみの変更であれば正常です。")
+        else:
+            lines.append("> ⚠️ **対象が空です。** パスまたは差分の抽出条件が壊れている可能性があります。")
+        lines.append("> いずれにせよ、この APPROVE は「問題が無い」ことを意味しません。")
         lines.append("")
     lines.append("> このレポートは静的パターン検査 (`review/panel_runner.py`) の結果です。")
     lines.append("> 文脈依存の欠陥は検出できません。本命の監査は `review/prompts/` の 5 プロンプトを")
@@ -295,7 +339,8 @@ def generate_markdown_report(task_id: str, domain: str, target: str, triage: dic
 
     return "\n".join(lines)
 
-def run_panel(target: str = None, diff_file: str = None, domain: str = "general", task_id: str = None, work_dir: str = None, output_file: str = None):
+def run_panel(target: str = None, diff_file: str = None, domain: str = "general", task_id: str = None, work_dir: str = None, output_file: str = None, excludes: list = None):
+    excludes = DEFAULT_EXCLUDES + list(excludes or [])
     if not task_id:
         task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -310,27 +355,44 @@ def run_panel(target: str = None, diff_file: str = None, domain: str = "general"
 
     content = ""
     target_name = ""
+    empty_reason = ""
     if diff_file and os.path.exists(diff_file):
         with open(diff_file, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+            raw = f.read()
+        content, dropped = filter_diff(raw, excludes)
+        if dropped:
+            print(f"[SKIP] 検査対象外のファイル {len(dropped)} 件: {', '.join(dropped[:5])}"
+                  + (" ..." if len(dropped) > 5 else ""))
+        if raw.strip() and not content.strip():
+            empty_reason = "filtered"
         target_name = f"Diff: {diff_file}"
     elif target and os.path.exists(target):
         if os.path.isfile(target):
+            # ファイルを名指しされた場合は除外を適用しない。
+            # 除外パス配下を意図して見せている(selfcheck の煙試験がこれ)。
             with open(target, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             target_name = f"File: {target}"
         else:
             aggregated = []
+            skipped = 0
             for root, _, files in os.walk(target):
                 for file in files:
-                    if file.endswith((".py", ".c", ".h", ".ts", ".js", ".sql")):
+                    if file.endswith(CODE_SUFFIXES):
                         fpath = os.path.join(root, file)
+                        if is_excluded(fpath, excludes):
+                            skipped += 1
+                            continue
                         try:
                             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                                 aggregated.append(f"\n# === FILE: {file} ===\n" + f.read())
                         except Exception:
                             pass
+            if skipped:
+                print(f"[SKIP] 除外パターンに一致したファイル {skipped} 件")
             content = "\n".join(aggregated)
+            if not content.strip():
+                empty_reason = "filtered"
             target_name = f"Directory: {target}"
     else:
         print("[ERROR] --target または --diff の有効なパスを指定してください。")
@@ -365,7 +427,7 @@ def run_panel(target: str = None, diff_file: str = None, domain: str = "general"
     with open(work_dir / "05_consensus_triage.json", "w", encoding="utf-8") as f:
         json.dump(triage, f, ensure_ascii=False, indent=2)
 
-    report_md = generate_markdown_report(task_id, domain, target_name, triage, len(content))
+    report_md = generate_markdown_report(task_id, domain, target_name, triage, len(content), empty_reason)
     final_report_path = work_dir / "final_consensus_review.md"
     with open(final_report_path, "w", encoding="utf-8") as f:
         f.write(report_md)
@@ -395,6 +457,8 @@ def main():
     # あり誤検知しうるため。落としたい CI では明示的に付けさせる。
     parser.add_argument("--fail-on-critical", action="store_true",
                         help="Critical が 1 件でもあれば exit code 1 で終了する (CI 用)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                        help=f"検査対象から外すパス (繰り返し可)。既定の除外に追加される: {DEFAULT_EXCLUDES}")
 
     args = parser.parse_args()
     if not args.target and not args.diff:
@@ -407,7 +471,8 @@ def main():
         domain=args.domain,
         task_id=args.task_id,
         work_dir=args.work_dir,
-        output_file=args.output
+        output_file=args.output,
+        excludes=args.exclude
     )
 
     if args.fail_on_critical and result["triage"]["critical_count"] > 0:
