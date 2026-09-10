@@ -33,6 +33,7 @@ CI に置いているのは「機械が確実に判定できる範囲を、人�
 review/
   panel_runner.py                       静的プレスキャナ (CI が実行)
   configs/domain_invariants.json        5 ドメインの不変条件定義
+  tests/test_panel_runner.py            検出ルールの回帰テスト (偽陽性ガード)
   prompts/
     01_security_auth.md                 セキュリティ・認可
     02_architecture_concurrency.md      アーキテクチャ・並行制御
@@ -91,19 +92,42 @@ python review/panel_runner.py --target src/payments --domain fintech
 - **散文を検査しない。** 検査するのは `.py` `.c` `.h` `.ts` `.js` `.sql` だけ。
   README・SKILL.md・CLAUDE.md は「`@pytest.mark.skip` を使うな」「ISR 内で Mutex を
   取るな」とパターンそのものを引用して説明するため、含めると必ず誤検知になる。
-- **差分カバレッジ・ゲート(テストサボり看破)は追加行だけを見る。** 生パッチ全体を見ると、
-  削除したテストの `-` 行や変更していない文脈行の `import pytest` が判定に混ざり、
-  CRITICAL(= マージブロック)の誤検知になる。conftest・フィクスチャの追加、テストの削除が
-  これで落ちていた。他の検査は従来どおりパッチ全体を見る(WARNING 止まりか、
-  当たれば確度が高いものなので実害が小さい)。
-- **`review/` 配下を検査しない**(既定の除外)。同じ理由で、パネル自身のプロンプトと
-  不変条件定義には検出したいパターンが説明として書いてある。
+- **削除行と文脈行を「新規実装」として扱わない。** すべての検査が、差分の
+  **追加行**に対して判定する。生パッチ全体を見ると、削除したテストの `-` 行や
+  変更していない文脈行の `import pytest` が判定に混ざり、誤検知になる。
+  「この変更で新たに持ち込まれた行」と「変更後のコードに存在する行」は区別して扱う
+  (前者で発火させ、後者で免責を判定する — 例: `compare_digest` が既にあれば出さない)。
+- **コメント行を検査しない。** `# 修正例: SECRET_KEY = '...'` のような記述例や TODO で
+  発火しないため。ただしコメントアウトされたテストの検知はコメント行を見る。
+- **本番コードをテストコードとして扱わない。** テスト関数の実効性(assert の有無、
+  過剰モック)は**テストファイル内で新規定義された関数**に限って判定する。
+  本番の `def test_connection()` をテスト関数と誤認しないため。
+- **`review/` 配下を検査しない**(既定の除外)。パネル自身のプロンプトと不変条件定義には
+  検出したいパターンが説明として書いてある。
   ただし**ファイルを名指しした場合は除外を適用しない** — `review/examples/sample_target.py`
   を意図して見せる selfcheck の煙試験がこれに当たる。
+- **全体像を観測できないものは判定しない。** 既存テストの一部書き換えのように、
+  関数本体の一部しか差分に現れない場合は判定を保留する。
+  見逃しを許容し、誤指摘を許容しない。
 
 検査対象が 0 件になった場合、レポートに理由が出る。「ドキュメントのみの変更」なら正常、
 「対象が空」ならパスか差分の抽出条件が壊れている。**どちらにせよ APPROVE は
 「問題が無い」を意味しない。**
+
+### 偽陽性を見つけたら
+
+**その場で `review:skip` して終わりにしない。** 起票しないと、同じ誤検知が
+このパネルを参照している全プロジェクトで再発する。
+
+```bash
+gh issue create --repo kant0123/gemini-review --label false-positive \
+  --title "<誤検知の症状を一文で>" \
+  --body "<指摘カテゴリ / 実際のコード / なぜ的外れか / 最小再現差分>"
+```
+
+上流では、受け取った偽陽性を `tests/test_panel_runner.py` の
+**「発火してはならないケース」として 1 件追加してから**ルールを直す。
+テストを先に固定しないと、別のルール変更で同じ誤検知が復活する。
 
 ## 出力 — コンテキスト隔離
 
@@ -140,3 +164,22 @@ review/work/<task_id>/
 - **テストのワークフローに相乗りさせないこと。** `deploy.yml` を採用している場合、
   CD は `workflow_run` で CI ワークフローの conclusion を待つため、レビュー指摘 1 件で
   本番デプロイまで止まる(`wiki-lint` を分けているのと同じ理由)。
+- 同じワークフローが、プレスキャナ本体より先に `review/tests` を走らせる。
+  `test.yml` は `requirements.txt` / `pyproject.toml` が無いとテストを実行しないため、
+  ここに置かないと検出ルールの回帰テストが誰にも走らせてもらえない。
+
+## 上流との同期
+
+`review/` は https://github.com/kant0123/gemini-review の vendoring。
+`panel_runner.py` とテストは配置場所を自動判別するので、同期はコピーで済む。
+
+```bash
+cp <上流>/scripts/panel_runner.py        review/panel_runner.py
+cp <上流>/configs/domain_invariants.json review/configs/domain_invariants.json
+cp <上流>/tests/test_panel_runner.py     review/tests/test_panel_runner.py
+python -m pytest review/tests -q
+```
+
+**`review/` を直接パッチしない。** 直したくなったら上流に Issue を立て、上流を直してから
+同期する。下流で直すと、次の同期で消えるか、消えないために同期されなくなるかのどちらかになる
+(実際に一度そうなった経緯は `wiki/` を参照)。
