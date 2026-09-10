@@ -122,6 +122,42 @@ git worktree remove ../<repo>-<名前>
 | CI のみ(推奨) | push/PR で自動テスト実行 | GitHub Actions(hosted runner で足りる) |
 | CI + CD | main への push を CI 成功後に自動デプロイ | デプロイ先環境、下記いずれかの CD 方式 |
 
+### ブランチ保護 — これを入れないと CI はゲートにならない
+
+**ワークフローを置いただけでは、マージは一度も止まらない。** GitHub Actions のジョブが赤くても
+`gh pr merge` はそのまま通る。マージを止めているのは常に**ブランチ保護の必須チェック**であり、
+ワークフローはその判定材料を作っているだけである。
+
+**この設定はリポジトリ側にあり、テンプレートのコピーには引き継がれない。** 新しく作った
+プロジェクトでは毎回手で有効化すること。飛ばすと、CI が緑でも赤でもマージできる状態のまま
+「CI 緑を確認してマージ」という手順だけが回り続ける。
+
+```bash
+gh api --method PUT repos/<owner>/<repo>/branches/main/protection \
+  --input .github/branch-protection.json
+```
+
+同梱の [.github/branch-protection.json](../.github/branch-protection.json) は
+`test` / `panel` を必須チェックにする。採用していないワークフローの名前は `contexts` から
+外すこと — **一度も実行されないチェックを必須にすると、PR が永久に pending のまま
+マージできなくなる。**
+
+| 設定 | 値 | 理由 |
+| --- | --- | --- |
+| `required_status_checks.contexts` | 採用したジョブ名 | `jobs:` 直下のキーであって、ワークフロー名 (`name:`) ではない |
+| `required_status_checks.strict` | `false` | `true` にすると main が進むたび全 PR で再 push が要る |
+| `required_pull_request_reviews` | `null` | **1 人開発では設定してはいけない。** 自分の PR は自分で承認できず、誰もマージできなくなる |
+| `enforce_admins` | `false` | 障害時に管理者が手で復旧する逃げ道を残す |
+
+`review:skip` / `wiki:skip` ラベルで外したジョブは **skipped = 成功**として扱われるため、
+必須チェックにしても逃げ道は塞がらない。
+
+ローカル側の同等チェックとして
+[.claude/hooks/check_review_panel.sh](../.claude/hooks/check_review_panel.sh) がある
+(`gh pr merge` の直前に発火し、Critical があればマージを差し止める)。
+**保護設定の代わりにはならない** — hook は Claude Code を使っているときしか動かず、
+GitHub の画面から押されたマージは素通しになる。両方入れる。
+
 ### CI — `tests` ワークフロー
 
 [.github/workflows/test.yml](../.github/workflows/test.yml)
@@ -224,8 +260,11 @@ Wiki 更新が不要な PR には `wiki:skip` ラベルを付ける。
 [.github/workflows/multi-expert-review.yml](../.github/workflows/multi-expert-review.yml)
 
 PR の差分に合議制レビューの**静的プレスキャナ**(`review/panel_runner.py`)を掛け、
-結果を PR コメントに投稿する。Critical があればジョブが失敗してマージをブロックする。
+結果を PR コメントに投稿する。Critical があればジョブが失敗する。
 仕組みの全体像は [review/README.md](../review/README.md)。
+
+- **ジョブが赤いだけではマージは止まらない。** `panel` を必須チェックにするブランチ保護
+  (上記「ブランチ保護」) を入れて初めてゲートになる。**この設定はコピー先に引き継がれない。**
 
 - **これが緑でも「レビュー済み」ではない。** プレスキャナは LLM を呼ばず、正規表現で
   定型パターン(金銭計算の float、`@pytest.mark.skip`、無防備な NOT NULL など)を
