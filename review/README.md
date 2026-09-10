@@ -91,6 +91,11 @@ python review/panel_runner.py --target src/payments --domain fintech
 - **散文を検査しない。** 検査するのは `.py` `.c` `.h` `.ts` `.js` `.sql` だけ。
   README・SKILL.md・CLAUDE.md は「`@pytest.mark.skip` を使うな」「ISR 内で Mutex を
   取るな」とパターンそのものを引用して説明するため、含めると必ず誤検知になる。
+- **差分カバレッジ・ゲート(テストサボり看破)は追加行だけを見る。** 生パッチ全体を見ると、
+  削除したテストの `-` 行や変更していない文脈行の `import pytest` が判定に混ざり、
+  CRITICAL(= マージブロック)の誤検知になる。conftest・フィクスチャの追加、テストの削除が
+  これで落ちていた。他の検査は従来どおりパッチ全体を見る(WARNING 止まりか、
+  当たれば確度が高いものなので実害が小さい)。
 - **`review/` 配下を検査しない**(既定の除外)。同じ理由で、パネル自身のプロンプトと
   不変条件定義には検出したいパターンが説明として書いてある。
   ただし**ファイルを名指しした場合は除外を適用しない** — `review/examples/sample_target.py`

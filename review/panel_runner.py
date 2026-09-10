@@ -39,6 +39,19 @@ DEFAULT_EXCLUDES = ["review/*"]
 CODE_SUFFIXES = (".py", ".c", ".h", ".ts", ".js", ".sql")
 
 
+def added_lines(content: str) -> str:
+    """差分なら追加行(+)だけを返す。差分でなければそのまま返す。
+
+    ファイルを直接渡された場合(--target)は + 接頭辞が無いので、全文を対象にする。
+    """
+    if "diff --git " not in content and not content.lstrip().startswith(("---", "+++")):
+        return content
+    return "\n".join(
+        line[1:] for line in content.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+
+
 def is_excluded(path: str, patterns: list) -> bool:
     normalized = path.replace("\\", "/").lstrip("./")
     return any(fnmatch.fnmatch(normalized, pat) for pat in patterns)
@@ -219,6 +232,41 @@ def analyze_qa(content: str, domain_info: dict) -> list:
             "impact": "既存の正常動作・後方互換性が破壊された事実がCIで隠蔽され、本番不具合の原因となります。",
             "recommendation": "テストをスキップせず、実装側を修正して既存テストの契約を満たしてください。"
         })
+
+    # 3-4. 差分カバレッジ・ゲート(テストサボり排除)
+    #
+    # この 2 件だけは **差分の追加行だけ** を見る。生パッチ全体を見ると、
+    # 「削除したテスト」の - 行や、変更していない文脈行の import が判定に混ざり、
+    # CRITICAL(= マージブロック)の誤検知になるため。具体的には次が全部誤爆する。
+    #   - conftest.py・フィクスチャの追加(フィクスチャに assert は普通書かない)
+    #   - テストの削除(- 行に def test_ が残る)
+    #   - import pytest だけのハンク(assert は文脈行の側にある)
+    scan = added_lines(content)
+
+    # 3. Test Omission (テストサボり)
+    has_logic_change = re.search(r'(?:def|class)\s+[a-zA-Z0-9_]+\s*[\(:]', scan)
+    has_test_added = re.search(r'(?:def\s+test_|class\s+Test)', scan)
+    if has_logic_change and not has_test_added:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Diff Coverage & Test Omission",
+            "issue": "新規ロジック（関数・クラス）が追加・変更されていますが、対応するテストコードが追加されていません。",
+            "impact": "未テストのロジックが本番にデプロイされ、想定外のエッジケースでシステムがクラッシュするリスクがあります。",
+            "recommendation": "差分カバレッジ・ゲートを通過するため、正常系および異常系のテストケース（test_*.py）を追加してください。"
+        })
+
+    # 4. No-Assertion Test (ダミーテスト)
+    # 「テスト関数を追加した」ことを条件にする(単に pytest という語があるだけでは発火しない)。
+    if has_test_added:
+        has_assertion = "assert " in scan or ".assert" in scan or "expect(" in scan
+        if not has_assertion:
+            findings.append({
+                "severity": "CRITICAL",
+                "category": "Meaningless / No-Assertion Test",
+                "issue": "テスト関数が追加されていますが、実効的なアサーション（assert）が一つも含まれていません。",
+                "impact": "例外が出ないことだけを確認するダミーテストであり、ロジックの正当性が全く保証されません。品質ゲートのすり抜けになります。",
+                "recommendation": "期待される戻り値や状態変化（DBのレコード数など）に対する明確な assert 文を記述してください。"
+            })
 
     return findings
 
