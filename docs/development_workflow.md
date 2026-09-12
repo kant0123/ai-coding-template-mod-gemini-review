@@ -32,7 +32,7 @@ flowchart TD
     verdict{"APPROVE?"}
     triage{"指摘を評価<br/>妥当な指摘がある?"}
     fp["誤検知を gemini-review に起票<br/>--triage で評価を記録"]
-    merge["gh pr merge --merge<br/>(エージェントの仕事はここまで)"]
+    merge["gh pr merge &lt;PR番号&gt; --merge<br/>(エージェントの仕事はここまで)"]
     mainCommit["main に merge commit"]
     mainPush["main への push"]
     mainTests["tests (CI) が main に対して走る"]
