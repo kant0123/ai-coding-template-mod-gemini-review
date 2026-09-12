@@ -30,14 +30,19 @@ script="$repo_root/review/agy_review.py"
 # review/ を採用していないプロジェクトでは何もしない。
 [[ -f "$script" ]] || exit 0
 
-# `gh pr merge 12` のように番号が明示されていればそれを使う。無ければ現在のブランチの PR。
-pr_args=()
+# PR 番号は必須。現在のブランチから引かない — hook はセッションの作業ディレクトリ
+# (メインツリー = main) で動くため、`cd <worktree> && gh pr merge` でも worktree の
+# ブランチは見えず、別の PR を判定するか gh の分かりにくいエラーで止まる。
 if [[ "$cmd" =~ gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+#?([0-9]+) ]]; then
-    pr_args=(--pr "${BASH_REMATCH[1]}")
+    pr="${BASH_REMATCH[1]}"
+else
+    echo "gh pr merge に PR 番号が指定されていないため、マージを差し止めました。" >&2
+    echo "agy レビューの記録を PR 番号で確認するので、\`gh pr merge <PR番号> --merge\` の形で再実行してください。" >&2
+    exit 2
 fi
 
 # 判定できない (gh の失敗など) 場合も止める。exit 2 以外は Claude Code がブロックとして扱わない。
-if ! python "$script" --check "${pr_args[@]}" >&2; then
+if ! python "$script" --check --pr "$pr" >&2; then
     echo "agy レビューの確認が取れないため、マージを差し止めました (手順: .agent/skills/agy-review/SKILL.md)。" >&2
     exit 2
 fi
