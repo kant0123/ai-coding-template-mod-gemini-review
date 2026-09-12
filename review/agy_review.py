@@ -99,15 +99,22 @@ def pr_info(pr):
 
 
 def ci_state(pr):
-    """(緑か, 説明) を返す。skip されたチェックは成功扱い。"""
+    """(緑か, 説明) を返す。skip されたチェックは成功扱い。
+
+    **チェックが 1 件も無い状態を緑にしない。** push 直後はチェックがまだ登録されておらず、
+    それを緑と読むと CI を待たずにレビューへ進んでしまう。gh の失敗 (出力が空) も同様。
+    """
     proc = run(["gh", "pr", "checks", str(pr), "--json", "name,bucket"])
-    if proc.returncode not in (0, 1, 8):
+    if not proc.stdout.strip():
         if "no checks reported" in proc.stderr:
-            return True, "CI のチェックがありません"
-        raise ReviewError(f"CI の状態を取得できませんでした: {proc.stderr.strip()}")
-    checks = json.loads(proc.stdout or "[]")
+            return False, "チェックがまだ登録されていません"
+        raise ReviewError(f"CI の状態を取得できませんでした (exit={proc.returncode}): {proc.stderr.strip()}")
+    try:
+        checks = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise ReviewError(f"gh pr checks の出力を解釈できませんでした: {proc.stdout[:200]}")
     if not checks:
-        return True, "CI のチェックがありません"
+        return False, "チェックがまだ登録されていません"
     bad = [f"{c['name']}={c['bucket']}" for c in checks if c["bucket"] not in ("pass", "skipping")]
     if bad:
         return False, ", ".join(bad)

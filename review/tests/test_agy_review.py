@@ -69,6 +69,39 @@ def test_render_marker_is_recognized_by_check():
     assert "````" in report
 
 
+# --- ci_state: CI 緑の判定 -----------------------------------------------------
+class Proc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def checks(*buckets):
+    return json.dumps([{"name": f"c{i}", "bucket": b} for i, b in enumerate(buckets)])
+
+
+@pytest.mark.parametrize("proc, green", [
+    (Proc(0, checks("pass", "skipping")), True),
+    (Proc(1, checks("pass", "fail")), False),
+    (Proc(8, checks("pass", "pending")), False),
+    (Proc(0, "[]"), False),
+    # push 直後でチェックが未登録
+    (Proc(1, "", "no checks reported on the 'x' branch"), False),
+])
+def test_ci_state(monkeypatch, proc, green):
+    monkeypatch.setattr(ar, "run", lambda *a, **k: proc)
+    assert ar.ci_state(1)[0] is green
+
+
+@pytest.mark.parametrize("proc", [
+    Proc(1, "", "HTTP 502"),
+    Proc(0, "not json"),
+])
+def test_ci_state_error_is_not_green(monkeypatch, proc):
+    monkeypatch.setattr(ar, "run", lambda *a, **k: proc)
+    with pytest.raises(ar.ReviewError):
+        ar.ci_state(1)
+
+
 # --- check_merge: マージ可否 ---------------------------------------------------
 def review(sha, verdict):
     return f"<!-- agy-review sha={sha} verdict={verdict} -->\n"
