@@ -64,20 +64,12 @@ jobs:
           fi
           find . -name '*.py' -not -path './.git/*' -print0 | xargs -0 python -m py_compile
 
-      - name: 合議制レビューのプレスキャナが実際に検出するか
+      - name: agy レビューの回帰テスト
         run: |
-          # 収録しているサンプルには既知の Critical が仕込んである。
-          # 「実行はできるが何も検出しない」状態で配られるのを防ぐための煙試験。
-          set +e
-          python review/panel_runner.py \
-            --target review/examples/sample_target.py \
-            --domain fintech --task-id selfcheck --fail-on-critical
-          code=$?
-          if [ "$code" -eq 0 ]; then
-            echo "::error::既知の欠陥を含むサンプルで Critical が 0 件だった(検出ロジックが壊れている)"
-            exit 1
-          fi
-          echo "サンプルの既知欠陥を検出した (exit=$code)。"
+          # 空出力を APPROVE にしない・古い head のレビューでマージを通さない、の回帰テスト。
+          # test.yml は requirements.txt が無いと何も実行しないので、ここで回す。
+          pip install pytest
+          python -m pytest review/tests -q
 
       - name: PowerShell の構文
         shell: pwsh

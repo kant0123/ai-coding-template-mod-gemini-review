@@ -1,185 +1,82 @@
-# [オプション] 合議制専門家パネル (Consensus Multi-Expert Review)
+# [オプション] agy レビュー
 
-PR をマージする前に、**5 名の専門家ロール**でコード差分を監査し、Lead Reviewer が
-合議・トリアージして 1 枚のレポートにまとめる仕組み。出自は独立リポジトリ
-「Gemini 合議制レビュー」で、このテンプレートに移植するにあたり
-**絶対パス依存を外し、PR ワークフローに接続した**。
+PR の CI が緑になった後、マージの前に、差分を **agy (Antigravity CLI) 経由で Gemini に 1 回レビューさせる**仕組み。
+差し戻しがあれば実装したエージェント(Claude)が指摘を評価し、修正して再レビューするか、
+誤検知として上流に起票してマージする。手順は [agy-review スキル](../.agent/skills/agy-review/SKILL.md)。
 
-採用しない場合、このディレクトリと以下をまるごと削除してよい。
+採用しない場合、以下をまとめて削除する。
 
-- `.agent/skills/multi-expert-review/`
-- `.github/workflows/multi-expert-review.yml`
-- `CLAUDE.md` の「[オプション] 合議制レビュー」節
-- `.agent/skills/pr-finish/SKILL.md` の「レビューパネルを通す」手順
-
-## 2 つの実行系 — 役割が違う
-
-| | 静的プレスキャナ | エージェント側パネル |
-| --- | --- | --- |
-| 実体 | `review/panel_runner.py` | `review/prompts/` の 5 プロンプト + `multi-expert-review` スキル |
-| 動かすもの | 正規表現・部分文字列マッチ | LLM(エージェント自身) |
-| 実行タイミング | CI が毎 PR に自動実行 | `pr-finish` の中でエージェントが実行 |
-| 速さ / コスト | 数秒・無料・API キー不要 | 遅い・トークンを食う |
-| 見えるもの | 定型パターン(float 金銭計算、`@pytest.mark.skip`、無防備な NOT NULL など) | 文脈依存の欠陥(認可の抜け、ドメイン不変条件の破綻、並行競合) |
-| 通ったときの意味 | **「問題なし」ではない。** 足切りを抜けただけ | 監査済み |
-
-**プレスキャナが APPROVE を出しても、それは見落としが無いことを意味しない。**
-CI に置いているのは「機械が確実に判定できる範囲を、人間とエージェントが忘れても必ず見る」ため。
-本命は常にエージェント側パネル。
+- `review/`
+- `.agent/skills/agy-review/`
+- `.claude/hooks/check_agy_review.sh` と `.claude/settings.example.json` の該当エントリ
+- `CLAUDE.md` の「[オプション] agy レビュー」節と、`pr-finish` スキルの手順 4
 
 ## 構成
 
 ```
 review/
-  panel_runner.py                       静的プレスキャナ (CI が実行)
-  configs/domain_invariants.json        5 ドメインの不変条件定義
-  tests/test_panel_runner.py            検出ルールの回帰テスト (偽陽性ガード)
-  prompts/
-    01_security_auth.md                 セキュリティ・認可
-    02_architecture_concurrency.md      アーキテクチャ・並行制御
-    03_domain_adversarial.md            ドメイン不変条件・敵対的 PoC
-    04_qa_breaking_guard.md             破壊的変更・テスト隠蔽
-    05_lead_consensus_triage.md         Lead Reviewer 合議・トリアージ
-  work/                                 中間成果物 (.gitignore 対象)
+  agy_review.py              レビュー実行・評価の記録・マージ可否の判定
+  prompt.md                  レビュアーへの指示 (観点・重大度・出力形式)
+  domain_invariants.json     ドメインごとの不変条件。プロンプトに差し込む
+  tests/test_agy_review.py   「レビューしていないのに通る」を防ぐ部分の回帰テスト
+  work/                      レポートの出力先 (.gitignore 対象)
 ```
 
-## ドメイン
+## 設計判断
 
-`--domain` で不変条件セットを切り替える。既定は `general`。
+### なぜ CI 緑の後か
 
-| 値 | 対象 |
-| --- | --- |
-| `general` | 一般的な Web / バックエンド (OWASP Top 10, Clean Architecture) |
-| `fintech` | 金融・暗号資産 (IEEE 754 丸め誤差、TOCTOU 二重出金) |
-| `distributed` | 分散・イベント駆動 (Dual-Write、分散ロック早期解放) |
-| `healthcare` | 医療・臨床安全 (単位混同、投与量上限バイパス) |
-| `embedded` | 組込み・車載 RTOS (CAN エンディアン、ISR 内ブロッキング) |
+レビューはトークンと時間を食い、非決定的でもある。テストで落ちる差分をレビューしても、
+修正すれば差分が変わってやり直しになる。**機械で決定的に判定できるものは CI に任せ、
+LLM は CI を通った差分だけを見る。**
 
-**プロジェクトの既定ドメインはリポジトリ変数 `REVIEW_DOMAIN` で指定する**
-(GitHub → Settings → Secrets and variables → Actions → Variables)。未設定なら `general`。
+### なぜ別のモデルか
 
-## 手で走らせる
+実装は Claude で行う前提なので、レビューは Gemini に担当させる(自分が書いたコードを
+自分で採点させない)。既定は `gemini-3.1-pro-high`。`--model` か環境変数 `REVIEW_MODEL` で変える。
 
-```bash
-git diff origin/main...HEAD > review/work/diff.patch
-python review/panel_runner.py --diff review/work/diff.patch --domain general
-```
+### なぜ 1 回の呼び出しか
 
-ファイル・ディレクトリを直接見せることもできる。
+以前は「正規表現のプレスキャナ(段 1)」と「5 ロールのプロンプトを順に回す合議(段 2)」の
+2 段構成だった。次の理由でやめた。
 
-```bash
-python review/panel_runner.py --target src/payments --domain fintech
-```
+- 段 1 は LLM を呼ばないのに CI の必須チェック・merge hook の両方でゲートになっていて、
+  ドキュメントの至る所で「通ってもレビュー済みではない」と打ち消す必要があった。
+  決定的に判定できる検査はテストに書けばよい。
+- 本命の段 2 はどこでも強制されておらず、実行者も決まっていなかった(実装した Claude 自身が回していた)。
+- 5 ロールの観点は 1 つのプロンプトに並べても失われない。合議の工程を外すと呼び出しは 1 回で済む。
 
-主なオプション。
+### なぜ PR コメントに記録するか
 
-| オプション | 意味 |
-| --- | --- |
-| `--target <path>` | 監査対象のファイル / ディレクトリ |
-| `--diff <path>` | git diff のパッチファイル(PR レビュー用) |
-| `--domain <name>` | 上表のドメイン。既定 `general` |
-| `--task-id <id>` | タスク識別子。既定 `task_YYYYMMDD_HHMMSS` |
-| `--work-dir <path>` | 中間成果物の出力先。既定 `review/work/<task_id>` |
-| `--output <path>` | 最終レポートの出力先 |
-| `--fail-on-critical` | Critical が 1 件でもあれば exit 1(CI 用。既定では落とさない) |
-| `--exclude <glob>` | 検査対象から外すパス(繰り返し可)。既定の除外に追加される |
-
-`--fail-on-critical` を既定にしていないのは、静的パターン検査が誤検知しうるため。
-落とすかどうかは CI 側で明示的に選ばせる。
-
-### 何を検査しないか
-
-- **散文を検査しない。** 検査するのは `.py` `.c` `.h` `.ts` `.js` `.sql` だけ。
-  README・SKILL.md・CLAUDE.md は「`@pytest.mark.skip` を使うな」「ISR 内で Mutex を
-  取るな」とパターンそのものを引用して説明するため、含めると必ず誤検知になる。
-- **削除行と文脈行を「新規実装」として扱わない。** すべての検査が、差分の
-  **追加行**に対して判定する。生パッチ全体を見ると、削除したテストの `-` 行や
-  変更していない文脈行の `import pytest` が判定に混ざり、誤検知になる。
-  「この変更で新たに持ち込まれた行」と「変更後のコードに存在する行」は区別して扱う
-  (前者で発火させ、後者で免責を判定する — 例: `compare_digest` が既にあれば出さない)。
-- **コメント行を検査しない。** `# 修正例: SECRET_KEY = '...'` のような記述例や TODO で
-  発火しないため。ただしコメントアウトされたテストの検知はコメント行を見る。
-- **本番コードをテストコードとして扱わない。** テスト関数の実効性(assert の有無、
-  過剰モック)は**テストファイル内で新規定義された関数**に限って判定する。
-  本番の `def test_connection()` をテスト関数と誤認しないため。
-- **`review/` 配下を検査しない**(既定の除外)。パネル自身のプロンプトと不変条件定義には
-  検出したいパターンが説明として書いてある。
-  ただし**ファイルを名指しした場合は除外を適用しない** — `review/examples/sample_target.py`
-  を意図して見せる selfcheck の煙試験がこれに当たる。
-- **全体像を観測できないものは判定しない。** 既存テストの一部書き換えのように、
-  関数本体の一部しか差分に現れない場合は判定を保留する。
-  見逃しを許容し、誤指摘を許容しない。
-
-検査対象が 0 件になった場合、レポートに理由が出る。「ドキュメントのみの変更」なら正常、
-「対象が空」ならパスか差分の抽出条件が壊れている。**どちらにせよ APPROVE は
-「問題が無い」を意味しない。**
-
-### 偽陽性を見つけたら
-
-**その場で `review:skip` して終わりにしない。** 起票しないと、同じ誤検知が
-このパネルを参照している全プロジェクトで再発する。
-
-```bash
-gh issue create --repo kant0123/gemini-review --label false-positive \
-  --title "<誤検知の症状を一文で>" \
-  --body "<指摘カテゴリ / 実際のコード / なぜ的外れか / 最小再現差分>"
-```
-
-上流では、受け取った偽陽性を `tests/test_panel_runner.py` の
-**「発火してはならないケース」として 1 件追加してから**ルールを直す。
-テストを先に固定しないと、別のルール変更で同じ誤検知が復活する。
-
-## 出力 — コンテキスト隔離
-
-各専門家の生レポートは `review/work/<task_id>/` に分離保存され、
-呼出元は最終成果物 `final_consensus_review.md` だけを読めばよい。
+記録を **head SHA ごと**に PR コメントの先頭のマーカーで残す。
 
 ```
-review/work/<task_id>/
-  01_security_report.json
-  02_architecture_report.json
-  03_domain_adversarial_report.json
-  04_qa_report.json
-  05_consensus_triage.json
-  final_consensus_review.md   ← これだけ読む
+<!-- agy-review sha=<40桁> verdict=APPROVE|CHANGES_REQUESTED -->
+<!-- agy-review-triage sha=<40桁> -->
 ```
 
-## 指摘の書き方 — 3 原則
+- push すれば head が変わるので、**修正後の再レビューを忘れる余地が無い。**
+- ローカルのファイルと違い worktree を消しても残り、人間も PR 上で経緯を追える。
+- merge hook は `python review/agy_review.py --check` でこのマーカーを見るだけで済む。
 
-エージェント側パネルを回すときは以下を守る(出自リポジトリの `AGENTS.md` から移設)。
+マーカーは誰でも書けるので、改ざんを防ぐ仕組みではない。**手順の飛ばし忘れを止めるための仕組み。**
 
-1. **偽陽性を出さない。** 実害のないチェックリスト項目や、文脈を無視した教科書的警告
-   (インメモリ辞書に TLS を要求する類)を出さない。指摘には必ず
-   「なぜ本番障害・インシデント・データ不整合に直結するのか」の機序を書く。
-2. **心理的安全性。** 「なぜこんな実装をしたのか」「初歩的なミス」といった非難表現を使わない。
-   「〜のリスクを防ぐため、このように改善することを提案します」と書く。
-3. **外科手術的な修正コード。** 概念論で止めず、そのまま適用できるスニペットを添える。
+## ヘッドレスの agy の癖(実測)
 
-## CI
+`agy_review.py` の `call_agy()` はこれを踏まえて書いてある。変えるときは注意する。
 
-`.github/workflows/multi-expert-review.yml` が PR ごとにプレスキャナを回し、
-レポートを PR コメントとして投稿する。Critical があればジョブが失敗してマージをブロックする。
+- **プロンプトは stdin に stream-json で渡す。** `-p` の引数に載せると Windows のコマンドライン長
+  (約 32KB)に当たる。ファイルのパスを渡して読ませる方式は、ヘッドレスではファイル読み取りの
+  許可が自動で拒否されて空振りする。本文を埋め込めばツールが一切要らず、agy がリポジトリを
+  書き換える余地も無くなる。
+- **結果は最後の `{"event":"result"}` 行の `result.structured_output` に入る。**
+  `--json-schema` を渡すとそこにスキーマどおりの JSON が入る。スキーマに `enum` を書かないと
+  `severity` が小文字で返ってくることがある。
+- **出力が空になることがある**(非 TTY で報告されている不具合)。空・解釈不能を「指摘 0 件」として
+  扱うと、レビューしていないのに APPROVE が記録される。スクリプトはエラーにして何も投稿しない。
 
-- 個別に外したい PR には `review:skip` ラベルを付ける。
-- **テストのワークフローに相乗りさせないこと。** `deploy.yml` を採用している場合、
-  CD は `workflow_run` で CI ワークフローの conclusion を待つため、レビュー指摘 1 件で
-  本番デプロイまで止まる(`wiki-lint` を分けているのと同じ理由)。
-- 同じワークフローが、プレスキャナ本体より先に `review/tests` を走らせる。
-  `test.yml` は `requirements.txt` / `pyproject.toml` が無いとテストを実行しないため、
-  ここに置かないと検出ルールの回帰テストが誰にも走らせてもらえない。
+## 誤検知を見つけたら
 
-## 上流との同期
-
-`review/` は https://github.com/kant0123/gemini-review の vendoring。
-`panel_runner.py` とテストは配置場所を自動判別するので、同期はコピーで済む。
-
-```bash
-cp <上流>/scripts/panel_runner.py        review/panel_runner.py
-cp <上流>/configs/domain_invariants.json review/configs/domain_invariants.json
-cp <上流>/tests/test_panel_runner.py     review/tests/test_panel_runner.py
-python -m pytest review/tests -q
-```
-
-**`review/` を直接パッチしない。** 直したくなったら上流に Issue を立て、上流を直してから
-同期する。下流で直すと、次の同期で消えるか、消えないために同期されなくなるかのどちらかになる
-(実際に一度そうなった経緯は `wiki/` を参照)。
+プロンプトの持ち主は上流の https://github.com/kant0123/gemini-review 。誤検知はそこに
+`false-positive` ラベルで起票する(手順はスキルの手順 4)。`prompt.md` をこのテンプレート側で
+直したら、同じ直しを上流にも Issue で伝える。
