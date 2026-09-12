@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PR の差分を agy (Antigravity CLI / Gemini) にレビューさせ、結果を PR コメントに残す。
 
-使い方 (手順全体は .agent/skills/agy-review/SKILL.md):
+使い方 (手順全体は agy-review スキル):
 
   python review/agy_review.py [--pr N]                 CI 緑を確認してレビューし、PR にコメントする
   python review/agy_review.py --triage FILE [--pr N]   差し戻しに対する評価を PR にコメントする
