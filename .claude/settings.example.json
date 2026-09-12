@@ -7,7 +7,7 @@
       "Bash(git diff *)",
       "Bash(git log *)",
       "Bash(python -m pytest *)",
-      "Bash(python review/panel_runner.py *)",
+      "Bash(python review/agy_review.py *)",
       "Bash(node scripts/wiki-lint.js *)"
     ]
   },
@@ -25,12 +25,12 @@
         ]
       },
       {
-        "_comment": "[オプション] gh pr merge 前に合議制パネルを掛け、Critical があればマージを差し止める。ブランチ保護の代わりではなく多層防御 (docs/development_workflow.md 「ブランチ保護」参照)。review/ を採用しないなら削除。",
+        "_comment": "[オプション] gh pr merge 前に、PR の head に対する agy レビューの記録 (差し戻しなら評価の記録も) があるかを確認し、無ければマージを差し止める。review/ を採用しないなら削除。",
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/check_review_panel.sh"
+            "command": "bash .claude/hooks/check_agy_review.sh"
           }
         ]
       }

@@ -32,28 +32,6 @@ git status
 - スキーマ変更があるなら、マイグレーションが含まれていて既存 DB がそのまま起動できることを確認する。
 - フロントを触ったなら実際に起動してブラウザで動作確認する。
 
-## 0. レビューパネルを通す(合議制レビューを採用している場合)
-
-**push する前に** `multi-expert-review` スキルで差分を監査する。詳しい手順はそちらにある。
-
-```bash
-git diff origin/main...HEAD > review/work/diff.patch
-python review/panel_runner.py --diff review/work/diff.patch --domain <domain>
-```
-
-これは静的プレスキャナ(段 1)で、**通っても「レビュー済み」ではない。**
-続けて `review/prompts/` の 5 プロンプトによる本監査(段 2)まで行う。
-
-- 🚨 Critical があれば **push しない。**直してから段 1 に戻る。
-- ⚠️ Warning を今の PR で直さないなら、その場で Issue に起票する
-  (`CLAUDE.md`「スコープ外の問題を発見したとき」)。
-- 結果は PR 本文の「レビューパネル」節に書く(次の手順のテンプレート)。
-
-push 後は CI (`multi-expert-review.yml`) が段 1 を自動で回して PR にコメントする。
-ローカルで先に回しておくのは、CI の失敗を待たずに潰すため。
-
-合議制レビューを採用していない場合はこの手順ごと削除する。
-
 ## 1. push
 
 ```bash
@@ -82,12 +60,13 @@ gh pr create --title "<一文>" --body "<下記テンプレート>"
 
 <更新したページ、または更新不要と判断した理由を一行>
 
-## レビューパネル
+## レビュー
 
-- ドメイン: `<general / fintech / distributed / healthcare / embedded>`
-- 判定: <APPROVE / COMMENT / REQUEST_CHANGES>
-- 対応: <Critical を N 件修正 / Warning を #45 に起票 / 指摘なし>
+- agy: <APPROVE / 差し戻し N 回 → APPROVE / 差し戻しを評価してマージ>
+- 起票: <kant0123/gemini-review#12 (誤検知) / #58 (スコープ外) / なし>
 ```
+
+「レビュー」節は作成時点では空欄でよく、マージ前に手順 4 の結果で埋める。
 
 - **`Fixes #<番号>` / `Closes #<番号>` を書かない。** クロージングキーワードがあると
   マージ時に GitHub が Issue を自動クローズし、後段の `gh issue close --comment` が
@@ -109,7 +88,23 @@ gh pr checks <PR番号> --watch
 失敗したらマージせず原因を調べる。修正が困難なら PR は開いたまま状況を報告する
 (勝手に close しない)。
 
-## 4. マージ
+## 4. agy レビュー(agy レビューを採用している場合)
+
+**CI が緑になってから** `agy-review` スキルに従う。詳しい手順はそちらにある。
+
+```bash
+python review/agy_review.py --pr <PR番号>
+```
+
+- APPROVE → 手順 5 へ。
+- 差し戻し → 指摘を評価する。妥当な指摘があれば直す場所まで戻って修正し、
+  push → 手順 3(CI)→ 手順 4(再レビュー)を繰り返す。
+  すべて誤検知・スコープ外なら起票して `--triage` で評価を記録し、手順 5 へ。
+
+レビュー記録の無いマージは `gh pr merge` の hook が差し止める。
+採用していない場合はこの手順ごと削除する。
+
+## 5. マージ
 
 ```bash
 gh pr merge <PR番号> --merge
@@ -129,7 +124,7 @@ failed to run git: fatal: 'main' is already used by worktree at '...'
 gh pr view <PR番号> --json state,mergedAt
 ```
 
-## 5. 後始末
+## 6. 後始末
 
 ```bash
 git push origin --delete <branch>
@@ -155,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File scripts/worktree-cleanup.ps1
 ツールが親ディレクトリを掴んでいる場合など)では、素の `git worktree remove` は
 Permission denied で失敗し、以後 `git worktree prune` も同じ場所で失敗し続ける。
 
-## 6. Issue をクローズする
+## 7. Issue をクローズする
 
 ```bash
 gh issue close <番号> --comment "<実装内容の要約>"
@@ -164,7 +159,7 @@ gh issue close <番号> --comment "<実装内容の要約>"
 既にクローズ済みだった場合は `gh issue comment <番号> --body "<要約>"` で要約だけ残す。
 **クローズの成否にかかわらず、要約は必ず Issue に残す。**
 
-## 7. デプロイの反映を確認する(本番同居 CD を採用している場合)
+## 8. デプロイの反映を確認する(本番同居 CD を採用している場合)
 
 **`git pull` で確認しない。** メインツリーの HEAD を前進させるのは CD の役目で、
 先に進めると CD が「更新なし」と判断して本番プロセスが古いコードのまま取り残される。
@@ -190,7 +185,7 @@ curl <ヘルスチェック URL>/healthz
 ## 事前承認の範囲
 
 push・PR 作成・マージ・ブランチ削除・worktree 削除は `CLAUDE.md` が事前承認しており、
-都度の確認は不要。CI 成功を確認したら、マージしてよいかを改めて聞かない。
+都度の確認は不要。CI 成功(agy レビューを採用しているならレビューの完了)を確認したら、マージしてよいかを改めて聞かない。
 
 ただし**タスクが失敗・中断した場合は勝手にマージ / 削除せず、状況を報告する。**
 worktree も残す(作業内容を失わないため)。

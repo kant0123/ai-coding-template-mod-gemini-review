@@ -3,7 +3,7 @@
 
   "required_status_checks": {
     "strict": false,
-    "contexts": ["test", "panel"]
+    "contexts": ["test"]
   },
   "required_pull_request_reviews": null,
   "enforce_admins": false,

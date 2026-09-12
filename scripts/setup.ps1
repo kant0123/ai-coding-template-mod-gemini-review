@@ -132,25 +132,21 @@ if ($wikiLintChoice -eq "y") {
     }
 }
 
-# --- 合議制レビュー ---
+# --- agy レビュー ---
 Write-Host ""
-$reviewChoice = Ask "合議制レビュー(PR ごとに 5 ロールで差分を監査)を使いますか? (y/n)" "y"
+$reviewChoice = Ask "agy レビュー(CI 緑の後に差分を Gemini でレビュー。agy が必要)を使いますか? (y/n)" "y"
 if ($reviewChoice -eq "y") {
-    Write-Host "  -> review/ と multi-expert-review スキルを維持します。"
-    Write-Host "     既定ドメインはリポジトリ変数 REVIEW_DOMAIN で指定します"
+    Write-Host "  -> review/ ・agy-review スキル・merge hook を維持します。"
+    Write-Host "     agy をインストール・ログインし、PATH に通してください。"
+    Write-Host "     ドメインは環境変数 REVIEW_DOMAIN で指定します"
     Write-Host "     (general / fintech / distributed / healthcare / embedded。未設定なら general)。"
-    Write-Host "     PR ごとに .github/workflows/multi-expert-review.yml が静的プレスキャナを回します。"
-    Write-Host "     これは足切りで、本監査はエージェントが review/prompts/ を実行する側です。"
 } else {
-    foreach ($p in @("review", ".agent/skills/multi-expert-review", ".claude/skills/multi-expert-review")) {
+    foreach ($p in @("review", ".agent/skills/agy-review", ".claude/skills/agy-review", ".claude/hooks/check_agy_review.sh")) {
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
-    if (Test-Path ".github/workflows/multi-expert-review.yml") {
-        Remove-Item -Force ".github/workflows/multi-expert-review.yml"
-    }
-    Write-Host "  -> review/ ・スキル・ワークフローを削除しました。"
-    Write-Host "     CLAUDE.md の「[オプション] 合議制レビュー」節と、pr-finish スキルの"
-    Write-Host "     「0. レビューパネルを通す」手順も削除してください。"
+    Write-Host "  -> review/ ・スキル・hook を削除しました。"
+    Write-Host "     CLAUDE.md の「[オプション] agy レビュー」節、pr-finish スキルの"
+    Write-Host "     「4. agy レビュー」手順、settings.example.json の該当 hook も削除してください。"
 }
 
 # --- ナレッジ Wiki ---

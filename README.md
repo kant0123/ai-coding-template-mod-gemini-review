@@ -30,17 +30,16 @@ CI/CD の仕組みはエージェントに依存しない汎用部分。
 | [.agent/skills/worktree-start/](.agent/skills/worktree-start/SKILL.md) | 着手手順(Wiki を読む → Issue 確保 → `origin/main` から worktree) | 推奨 |
 | [.agent/skills/wiki-ingest/](.agent/skills/wiki-ingest/SKILL.md) | 実装後に変更を `wiki/` へ反映する手順(Wiki を採用する場合) | 推奨 |
 | [.agent/skills/pr-finish/](.agent/skills/pr-finish/SKILL.md) | 完了手順(PR → CI → マージ → 後始末 → Issue クローズ → 反映確認)。`--fill` / `Fixes` / `--delete-branch` の罠つき | 推奨 |
-| [.agent/skills/multi-expert-review/](.agent/skills/multi-expert-review/SKILL.md) | push 前に差分を 5 名の専門家ロールで監査する合議制レビューの手順 | オプション |
-| [review/](review/README.md) | 合議制レビューの実体(5 ロールのプロンプト・5 ドメインの不変条件定義・CI 用の静的プレスキャナ) | オプション |
+| [.agent/skills/agy-review/](.agent/skills/agy-review/SKILL.md) | CI 緑の後に差分を agy (Gemini) でレビューし、差し戻しを評価して修正ループ / 誤検知の起票に振り分ける手順 | オプション |
+| [review/](review/README.md) | agy レビューの実体(レビュー実行スクリプト・プロンプト・5 ドメインの不変条件定義) | オプション |
 | [.agent/skills/agent-config-manager/](.agent/skills/agent-config-manager/SKILL.md) | 「ルールを追加して」等の要求に対し、Rule/Hook/Skill/Workflow のどれで実装すべきかを判断するスキル | 推奨 |
 | [.agent/skills/skill-template/](.agent/skills/skill-template/SKILL.md) | 新しい Skill を作るときのひな形。コピーして使う | オプション |
-| [.claude/hooks/](.claude/hooks/check_wiki_updated.sh) | `gh pr create` の直前に `wiki/` の更新有無を確認する hook | オプション |
+| [.claude/hooks/](.claude/hooks/check_wiki_updated.sh) | `gh pr create` の直前に `wiki/` の更新有無を確認する hook と、`gh pr merge` の直前に agy レビューの記録を確認する hook | オプション |
 | [.claude/settings.example.json](.claude/settings.example.json) | permissions / hooks の設定例 | オプション |
 | [docs/development_workflow.md](docs/development_workflow.md) | worktree ベースの Git 運用 + CI/CD の全体像 | 推奨 |
 | [docs/wiki_workflow.md](docs/wiki_workflow.md) | Wiki の背景・導入手順・既存プロジェクトからの移行手順 | 推奨 |
 | [.github/workflows/test.yml](.github/workflows/test.yml) | CI(push/PR で自動テスト)。テストの仕組みがまだ無いうちは警告だけ出して成功する | 推奨(既定で有効) |
-| [.github/workflows/multi-expert-review.yml](.github/workflows/multi-expert-review.yml) | PR ごとに合議制レビューの静的プレスキャナを回し、結果を PR コメントに投稿する。Critical でマージをブロック | オプション(既定で有効) |
-| [.github/workflows/selfcheck.yml](.github/workflows/selfcheck.yml) | **このテンプレート自身**の検査(wiki-lint / シェル・PowerShell・Python の構文 / `.ps1` の BOM / プレスキャナの煙試験)。コピー先には不要で、セットアップスクリプトが削除する | テンプレート専用 |
+| [.github/workflows/selfcheck.yml](.github/workflows/selfcheck.yml) | **このテンプレート自身**の検査(wiki-lint / シェル・PowerShell・Python の構文 / `.ps1` の BOM / レビュースクリプトの回帰テスト)。コピー先には不要で、セットアップスクリプトが削除する | テンプレート専用 |
 | [.github/workflows-optional/](.github/workflows-optional/README.md) | CD(self-hosted デプロイ)・label-hygiene・wiki-check の雛形。`.github/workflows/` に置くまで実行されない | オプション |
 | [deploy/](deploy/README.md) | CD スクリプト雛形(CI 再確認・drift 検知・バックアップ・反映確認・失敗時ロールバック・結果の可視化)と watchdog 雛形。runner のサービス化を含む導入手順と落とし穴は `deploy/README.md` | オプション |
 | [scripts/worktree-cleanup.ps1](scripts/worktree-cleanup.ps1) | `git worktree remove` が Permission denied で失敗した後の復旧(Windows 専用) | オプション |
@@ -51,8 +50,8 @@ CI/CD の仕組みはエージェントに依存しない汎用部分。
 - **Git** 2.20 以降(worktree 機能を使うため)
 - **GitHub CLI (`gh`)** — PR 作成・マージ・Issue 操作に必要
 - (オプション) GitHub Actions が有効なリポジトリ(CI/CD を使う場合)
-- (オプション) **Python 3.9 以降** — 合議制レビューの静的プレスキャナをローカルで回す場合
-  (CI 側は `actions/setup-python` が用意する)
+- (オプション) **Python 3.9 以降** と **agy (Antigravity CLI)** — agy レビューを使う場合
+  (`agy` はログイン済みで PATH に通っていること)
 
 ## 使い方
 
