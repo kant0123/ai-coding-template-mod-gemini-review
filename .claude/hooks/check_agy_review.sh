@@ -43,7 +43,7 @@ fi
 
 # 判定できない (gh の失敗など) 場合も止める。exit 2 以外は Claude Code がブロックとして扱わない。
 if ! python "$script" --check --pr "$pr" >&2; then
-    echo "agy レビューの確認が取れないため、マージを差し止めました (手順: .agent/skills/agy-review/SKILL.md)。" >&2
+    echo "agy レビューの確認が取れないため、マージを差し止めました (手順: agy-review スキル)。" >&2
     exit 2
 fi
 exit 0

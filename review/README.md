@@ -22,6 +22,59 @@ review/
   work/                      レポートの出力先 (.gitignore 対象)
 ```
 
+## 導入するときの注意
+
+### 前提
+
+- `agy` がインストール・ログイン済みで PATH に通っていること、`python` (3.9 以降) と `gh` があること。
+  hook も `python` を呼ぶので、Node.js などのプロジェクトでも Python は要る。
+- **差分は agy 経由で Google に送られる。** private リポジトリでも同じ。
+  秘匿情報をコミットしていなければ差分には載らないが、誤ってコミットした場合は差分ごと送信される。
+
+### 強制が効き始めるのは、メインツリーに導入が反映されてから
+
+hook の登録 (`.claude/settings.json`) も判定スクリプト (`review/agy_review.py`) も、
+Claude Code のセッションを開いた**メインツリー**から読まれる。hook は `review/agy_review.py` が
+無いと何もせず通す (採用していないプロジェクトを壊さないため)。
+
+- 導入 PR 自体は hook に守られない。**導入 PR は手で `python review/agy_review.py --pr <番号>` を
+  通してからマージする。**
+- マージ後、メインツリーに `review/` と hook の登録が入ったことを確かめ、
+  レビューしていない PR 番号で `gh pr merge <番号> --merge` が差し止められることを確認してから運用を始める。
+
+### 本番同居 CD の構成では、デプロイの反映まで待つ
+
+メインツリーを前進させるのが CD だけの構成 (`CLAUDE.md`「本番同居チェックアウトの追加ルール」) では、
+**導入 PR のデプロイが完了するまで強制が始まらない**。その間にマージされた PR はレビューを素通しする。
+
+- デプロイの反映は `/healthz` の `commit` か `deploy` ワークフローの `status` で確認する
+  (`git pull` で先回りしない)。
+- **メインツリーに未コミット変更があると CD は `blocked` で止まり、強制が始まらない状態が黙って続く。**
+  導入前に `git status` でメインツリーが綺麗なことを確認する。
+- `review/work/` と `__pycache__/` は `.gitignore` に入れる。デプロイスクリプトが未追跡ファイルを
+  数えない作りなら止まらないが、数える作りだと `review/agy_review.py` を実行しただけでデプロイが止まる。
+
+### ブランチ保護が使えなくても成立する
+
+GitHub の無料プランの private リポジトリではブランチ保護が使えない (API が 403 を返す)。
+agy レビューは CI のチェックではなく merge hook で担保するので、影響を受けない
+(CI 緑の確認は従来どおりエージェントの手順と `agy_review.py` の CI 判定が担う)。
+ただし hook は Claude Code 経由のマージにしか効かず、GitHub の画面から押されたマージは止められない。
+
+### 既存プロジェクトに入れる場合
+
+`scripts/setup.ps1` / `setup.sh` はテンプレートをコピーした直後のリポジトリ向けで、
+独自に育った `CLAUDE.md` やスキルには使えない。次を手で入れる。
+
+| 対象 | やること |
+| --- | --- |
+| `review/` | `agy_review.py` / `prompt.md` / `domain_invariants.json` / `README.md` をコピー。`tests/` は CI で Python のテストを回さないなら省いてよい |
+| スキル | `agy-review` をコピー (`.agent/skills/` と `.claude/skills/` のうち、プロジェクトが使っている方) |
+| hook | `.claude/hooks/check_agy_review.sh` をコピーし、`.claude/settings.json` の `PreToolUse` に登録 |
+| `pr-finish` スキル | CI 確認とマージの間に「agy レビュー」の手順を足し、PR 本文テンプレートに「レビュー」節を足す。「事前承認の範囲」のマージ条件にレビューの完了を加える |
+| `CLAUDE.md` | 「[オプション] agy レビュー」節、スキル一覧の行、「完了の定義」の行を足す |
+| `.gitignore` | `review/work/` と `__pycache__/` |
+
 ## 設計判断
 
 ### なぜ CI 緑の後か
