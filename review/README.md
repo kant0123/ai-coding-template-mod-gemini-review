@@ -51,6 +51,9 @@ Claude Code のセッションを開いた**メインツリー**から読まれ�
   (`git pull` で先回りしない)。
 - **メインツリーに未コミット変更があると CD は `blocked` で止まり、強制が始まらない状態が黙って続く。**
   導入前に `git status` でメインツリーが綺麗なことを確認する。
+  持ち主の分からない変更が残っていたら、差分が触れている Issue の更新状況を見る。
+  変更の後に更新が無ければ放棄された作業とみなし、差分を退避してから破棄してよいか人間に確認する
+  (実例: AlexaLogDB では 2 日前に書かれた `src/config.js` の変更が、参照先 Issue の最終更新より新しいまま残っていた)。
 - `review/work/` と `__pycache__/` は `.gitignore` に入れる。デプロイスクリプトが未追跡ファイルを
   数えない作りなら止まらないが、数える作りだと `review/agy_review.py` を実行しただけでデプロイが止まる。
 
@@ -64,16 +67,40 @@ agy レビューは CI のチェックではなく merge hook で担保するの
 ### 既存プロジェクトに入れる場合
 
 `scripts/setup.ps1` / `setup.sh` はテンプレートをコピーした直後のリポジトリ向けで、
-独自に育った `CLAUDE.md` やスキルには使えない。次を手で入れる。
+独自に育った `CLAUDE.md` やスキルには使えない。次を手で入れる
+(実施例: kant0123/AlexaLogDB#175 — Node.js / 本番同居 CD / private 無料プラン / Wiki 運用中)。
 
 | 対象 | やること |
 | --- | --- |
-| `review/` | `agy_review.py` / `prompt.md` / `domain_invariants.json` / `README.md` をコピー。`tests/` は CI で Python のテストを回さないなら省いてよい |
-| スキル | `agy-review` をコピー (`.agent/skills/` と `.claude/skills/` のうち、プロジェクトが使っている方) |
-| hook | `.claude/hooks/check_agy_review.sh` をコピーし、`.claude/settings.json` の `PreToolUse` に登録 |
-| `pr-finish` スキル | CI 確認とマージの間に「agy レビュー」の手順を足し、PR 本文テンプレートに「レビュー」節を足す。「事前承認の範囲」のマージ条件にレビューの完了を加える |
-| `CLAUDE.md` | 「[オプション] agy レビュー」節、スキル一覧の行、「完了の定義」の行を足す |
+| `review/` | `agy_review.py` / `prompt.md` / `domain_invariants.json` / `README.md` をコピー。README の冒頭(採用しない場合の削除一覧)と導入手引きはプロジェクト向けに削る |
+| `review/tests/` | CI で Python のテストを回さないなら省く。その場合、**`agy_review.py` はテンプレート側で直してテストを通してからコピーする**(導入先で直すと誰もテストしない) |
+| `review/work/.gitkeep` | コピーしない。`.gitignore` で `review/work/` をディレクトリごと除外すると追跡できず、スクリプトが実行時に自分で作る |
+| スキル | `agy-review` をコピー (`.agent/skills/` と `.claude/skills/` のうち、プロジェクトが使っている方)。冒頭の「このファイルはテンプレートです」を削る |
+| hook | `.claude/hooks/check_agy_review.sh` をコピーし、`.claude/settings.json` の `PreToolUse` に登録。許可プロンプトを減らすなら `permissions.allow` に `Bash(python review/agy_review.py *)` |
+| `pr-finish` スキル | CI 確認とマージの間に「agy レビュー」の手順を足し、**後続の見出し番号と本文中の「手順 N」参照を繰り下げる**。PR 本文テンプレートに「レビュー」節を足し、「事前承認の範囲」のマージ条件にレビューの完了を加える |
+| `CLAUDE.md` | 「[オプション] agy レビュー」節、スキル一覧の行、「完了の定義」の行を足す。「常に守ること」の事前承認の文言にもレビュー完了を足す。秘匿情報を持つプロジェクトなら、差分が外部に送られる旨をその情報の名前つきで書く |
 | `.gitignore` | `review/work/` と `__pycache__/` |
+| `wiki/` | Wiki を運用しているなら、プロジェクト固有の事情(強制が効かない期間、ブランチ保護の有無、差分の外部送信)を operations のページに書く。仕組みの一般論は `review/README.md` を参照させて重複させない |
+
+`.gitattributes` で `.sh` を LF に固定していない導入先でも、hook は CRLF で展開されたまま
+Git Bash で動く(AlexaLogDB で確認)。テンプレート自身が LF に固定しているのは `bash -n` の CI のため。
+
+### 導入 PR の通し方
+
+hook は導入 PR 自体を守れないので、この PR だけ手で順に確認する。
+
+1. push して CI が緑になるのを待つ。
+2. worktree から `python review/agy_review.py --pr <番号>` を実行する。差し戻しは通常どおり評価する。
+3. PR 本文の「レビュー」節に、手動で実行したことを書いてマージする。
+4. メインツリーへの反映を待つ(本番同居 CD ならデプロイの `status: deployed` と `/healthz` の `commit`)。
+5. **メインツリーで** hook を確かめる。レビューしていない過去の PR 番号(マージ済みのものなら、hook が
+   止めなくても gh が失敗するだけで無害)で差し止められること、番号なしの `gh pr merge` が差し止められること、
+   レビュー済みの導入 PR の番号では通ることを見る。hook を直接叩くなら次のとおり
+   (`<N>` は PR 番号。コマンド文字列を手元の Claude Code に打つと、有効な hook 自身が反応する点に注意)。
+
+   ```bash
+   printf '{"tool_input":{"command":"gh pr merge <N> --merge"}}' | bash .claude/hooks/check_agy_review.sh; echo $?
+   ```
 
 ## 設計判断
 
