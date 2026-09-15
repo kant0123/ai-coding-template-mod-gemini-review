@@ -183,6 +183,21 @@ def test_extract_snapshot_writes_regular_files_only(tmp_path):
     assert len(skipped) == 4
 
 
+@pytest.mark.parametrize("name, secret", [
+    (".env", True), (".env.local", True), ("id_rsa", True), ("server.key", True),
+    (".env.example", False), ("app.py", False), ("keyboard.py", False),
+])
+def test_is_secret_name(name, secret):
+    assert ar.is_secret_name(name) is secret
+
+
+@pytest.mark.parametrize("returncode, stdout", [(1, b""), (0, b"")])
+def test_fetch_tarball_failure_is_error(monkeypatch, returncode, stdout):
+    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: Proc(returncode, stdout, b"HTTP 404"))
+    with pytest.raises(ar.ReviewError):
+        ar.fetch_tarball(SHA)
+
+
 def test_extract_snapshot_with_no_files_is_error(tmp_path):
     import tarfile
     with pytest.raises(ar.ReviewError):
@@ -198,6 +213,58 @@ def test_snapshot_is_removed_even_on_error(tmp_path):
             readonly.chmod(0o444)
             raise RuntimeError("boom")
     assert not root.exists()
+
+
+class RunningProc:
+    """communicate が指定の例外を投げる agy のプロセス。"""
+    pid = 999
+    returncode = None
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def communicate(self, *args, timeout=None):
+        if timeout is not None:
+            raise self.exc
+        return b"", b""
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        pass
+
+
+@pytest.mark.parametrize("exc, expected", [
+    (ar.subprocess.TimeoutExpired("agy", 60), ar.ReviewError),
+    (KeyboardInterrupt(), KeyboardInterrupt),
+])
+def test_call_agy_kills_process_tree_when_interrupted(monkeypatch, tmp_path, exc, expected):
+    # 子プロセスが残るとスナップショットのファイルを掴んだままになり、後片付けで消せない。
+    monkeypatch.setattr(ar, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(ar.subprocess, "Popen", lambda *a, **k: RunningProc(exc))
+    killed = []
+    monkeypatch.setattr(ar, "kill_tree", lambda proc: killed.append(proc.pid))
+    with pytest.raises(expected):
+        ar.call_agy("prompt", "model", 1, tmp_path)
+    assert killed == [999]
+
+
+def test_kill_tree_uses_taskkill_on_windows(monkeypatch):
+    monkeypatch.setattr(ar.os, "name", "nt")
+    called = []
+    monkeypatch.setattr(ar.subprocess, "run", lambda cmd, **k: called.append(cmd))
+    ar.kill_tree(RunningProc(None))
+    assert called == [["taskkill", "/PID", "999", "/T", "/F"]]
+
+
+def test_kill_tree_kills_process_group_on_posix(monkeypatch):
+    monkeypatch.setattr(ar.os, "name", "posix")
+    monkeypatch.setattr(ar.signal, "SIGKILL", 9, raising=False)
+    called = []
+    monkeypatch.setattr(ar.os, "killpg", lambda pid, sig: called.append((pid, sig)), raising=False)
+    ar.kill_tree(RunningProc(None))
+    assert called == [(999, 9)]
 
 
 def test_sweep_removes_only_stale_snapshots(tmp_path):
