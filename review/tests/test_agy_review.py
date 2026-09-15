@@ -140,17 +140,72 @@ def test_denied_tool_with_empty_response_is_error():
     assert e.value.denied == ["command"]
 
 
-def test_retry_only_on_tool_denied():
-    prompts = []
+def denied_step(tool, params):
+    return json.dumps({"event": "step_update", "step_update": {
+        "state": "ERROR", "tool_name": tool,
+        "tool_info": {"parameters": params, "error": {"message": "user denied permission to run command"}}}})
 
-    def flaky(prompt, *a):
-        prompts.append(prompt)
-        if len(prompts) == 1:
-            raise ar.ToolDeniedError("denied", ["command"])
+
+def test_denied_error_carries_conversation_and_calls():
+    out = "\n".join([
+        denied_step("run_command", {"CommandLine": 'python -c "print(1)"'}),
+        denied_step("run_command", {"CommandLine": 'python -c "print(1)"'}),
+        result_line(conversation_id="conv-1", status="SUCCESS", response="",
+                    denied_actions=[{"action": "command"}]),
+    ])
+    with pytest.raises(ar.ToolDeniedError) as e:
+        ar.parse_output(out)
+    assert e.value.conversation == "conv-1"
+    assert e.value.calls == ['run_command: python -c "print(1)"']
+
+
+def denial(conversation="conv-1", calls=("run_command: python -c x",), raw="denied-raw"):
+    e = ar.ToolDeniedError("denied", ["command"], conversation, calls)
+    e.raw = raw
+    return e
+
+
+def test_retry_continues_denied_conversation_naming_the_call():
+    sent = []
+
+    def flaky(message, model, timeout, add_dir, conversation):
+        sent.append((message, conversation))
+        if len(sent) == 1:
+            raise denial()
         return [], "raw"
 
-    assert ar.call_agy_with_retry("P", "m", 1, "d", call=flaky) == ([], "raw")
-    assert prompts[0] == "P" and "command" in prompts[1]
+    assert ar.call_agy_with_retry("P", "m", 1, "d", call=flaky) == ([], "denied-raw\nraw")
+    assert sent[0] == ("P", None)
+    message, conversation = sent[1]
+    assert conversation == "conv-1"
+    assert "python -c x" in message and not message.startswith("P")
+
+
+def test_retry_without_conversation_restarts_with_note():
+    sent = []
+
+    def flaky(message, model, timeout, add_dir, conversation):
+        sent.append((message, conversation))
+        if len(sent) == 1:
+            raise denial(conversation=None, calls=())
+        return [], "raw"
+
+    ar.call_agy_with_retry("P", "m", 1, "d", call=flaky)
+    assert sent[1][1] is None
+    assert sent[1][0].startswith("P\n\n") and "command" in sent[1][0]
+
+
+def test_retry_note_accumulates_denied_calls():
+    sent = []
+
+    def denied_twice(message, model, timeout, add_dir, conversation):
+        sent.append(message)
+        if len(sent) <= 2:
+            raise denial(calls=(f"run_command: cmd{len(sent)}",))
+        return [], "raw"
+
+    ar.call_agy_with_retry("P", "m", 1, "d", call=denied_twice)
+    assert "cmd1" in sent[2] and "cmd2" in sent[2]
 
 
 def test_retry_gives_up_and_other_errors_are_not_retried():
@@ -158,7 +213,7 @@ def test_retry_gives_up_and_other_errors_are_not_retried():
 
     def always_denied(*a):
         calls.append(1)
-        raise ar.ToolDeniedError("denied", ["command"])
+        raise denial()
 
     with pytest.raises(ar.ToolDeniedError):
         ar.call_agy_with_retry("P", "m", 1, "d", call=always_denied, retries=2)
