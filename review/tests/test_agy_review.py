@@ -130,3 +130,158 @@ def test_changes_requested_without_triage_blocks():
 
 def test_changes_requested_with_triage_passes():
     assert ar.check_merge(review(SHA, "CHANGES_REQUESTED") + triage(SHA), SHA)[0]
+
+
+# --- ツール拒否: 途中で終わったレビューを APPROVE にしない ----------------------
+def test_denied_tool_with_empty_response_is_error():
+    out = result_line(status="SUCCESS", response="", denied_actions=[{"action": "command"}])
+    with pytest.raises(ar.ReviewError, match="command"):
+        ar.parse_output(out)
+
+
+# --- スナップショットの展開 -----------------------------------------------------
+def make_tar(entries):
+    """entries: [(name, bytes | None, type)]。type は tarfile の型定数。"""
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data, kind in entries:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            if kind == tarfile.SYMTYPE:
+                info.linkname = "../../outside"
+            if data is not None:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+            else:
+                tar.addfile(info)
+    return buf.getvalue()
+
+
+def test_extract_snapshot_writes_regular_files_only(tmp_path):
+    import tarfile
+    data = make_tar([
+        ("owner-repo-abc/", None, tarfile.DIRTYPE),
+        ("owner-repo-abc/src/app.py", b"print(1)\n", tarfile.REGTYPE),
+        ("owner-repo-abc/.env", b"TOKEN=x\n", tarfile.REGTYPE),
+        ("owner-repo-abc/.env.example", b"TOKEN=\n", tarfile.REGTYPE),
+        ("owner-repo-abc/keys/server.pem", b"key\n", tarfile.REGTYPE),
+        ("owner-repo-abc/link", None, tarfile.SYMTYPE),
+        ("owner-repo-abc/../escape.txt", b"x", tarfile.REGTYPE),
+    ])
+    dest = tmp_path / "snap"
+    dest.mkdir()
+    written, skipped = ar.extract_snapshot(data, dest)
+    assert written == 2
+    assert (dest / "src" / "app.py").read_bytes() == b"print(1)\n"
+    assert (dest / ".env.example").exists()
+    assert not (dest / ".env").exists()
+    assert not (dest / "keys" / "server.pem").exists()
+    assert not (dest / "link").exists()
+    assert not (tmp_path / "escape.txt").exists()
+    assert len(skipped) == 4
+
+
+def test_extract_snapshot_with_no_files_is_error(tmp_path):
+    import tarfile
+    with pytest.raises(ar.ReviewError):
+        ar.extract_snapshot(make_tar([("owner-repo-abc/", None, tarfile.DIRTYPE)]), tmp_path)
+
+
+# --- スナップショットの後片付け -------------------------------------------------
+def test_snapshot_is_removed_even_on_error(tmp_path):
+    with pytest.raises(RuntimeError):
+        with ar.snapshot_dir(tmp_path) as root:
+            readonly = root / "readonly.txt"
+            readonly.write_text("x")
+            readonly.chmod(0o444)
+            raise RuntimeError("boom")
+    assert not root.exists()
+
+
+def test_sweep_removes_only_stale_snapshots(tmp_path):
+    import os
+    old = tmp_path / f"{ar.SNAPSHOT_PREFIX}old"
+    new = tmp_path / f"{ar.SNAPSHOT_PREFIX}new"
+    other = tmp_path / "unrelated-old"
+    for d in (old, new, other):
+        d.mkdir()
+    now = 10 * 86400
+    os.utime(old, (now - 25 * 3600, now - 25 * 3600))
+    os.utime(new, (now - 1 * 3600, now - 1 * 3600))
+    os.utime(other, (now - 25 * 3600, now - 25 * 3600))
+    removed = ar.sweep_stale_snapshots(tmp_path, now=now)
+    assert removed == [old]
+    assert new.exists() and other.exists()
+
+
+# --- Wiki ページの選択 ----------------------------------------------------------
+DIFF = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-a
++b
+diff --git a/wiki/components/app.md b/wiki/components/app.md
+"""
+
+
+def test_changed_paths():
+    assert ar.changed_paths(DIFF) == ["src/app.py", "wiki/components/app.md"]
+
+
+def write_page(root, rel, body):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def test_select_wiki_pages_ranks_and_budgets(tmp_path):
+    write_page(tmp_path, "wiki/overview.md", "overview")
+    write_page(tmp_path, "wiki/index.md", "`src/app.py:1`")
+    write_page(tmp_path, "wiki/components/_template.md", "`src/app.py:1`")
+    write_page(tmp_path, "wiki/components/app.md", "changed page")
+    write_page(tmp_path, "wiki/concepts/uses-app.md", "入口は `src/app.py:10 main()` にある")
+    write_page(tmp_path, "wiki/concepts/example-only.md", "```\n`src/app.py:1`\n```")
+    write_page(tmp_path, "wiki/concepts/unrelated.md", "`src/other.py:1`")
+    write_page(tmp_path, "wiki/operations/huge.md", "`./src/app.py` " + "x" * 1000)
+
+    included, omitted = ar.select_wiki_pages(tmp_path, ar.changed_paths(DIFF), budget=200)
+    assert [rel for rel, _ in included] == ["wiki/overview.md", "wiki/components/app.md", "wiki/concepts/uses-app.md"]
+    assert omitted == ["wiki/operations/huge.md"]
+
+
+def test_select_wiki_pages_without_wiki(tmp_path):
+    assert ar.select_wiki_pages(tmp_path, ["src/app.py"], budget=1000) == ([], [])
+
+
+def test_code_refs_keeps_dotted_directories():
+    assert ar.code_refs("`.github/workflows/test.yml:3`") == {".github/workflows/test.yml"}
+
+
+# --- agy が読んだファイル -------------------------------------------------------
+def step(tool, state, **params):
+    return json.dumps({"event": "step_update", "step_update": {
+        "tool_name": tool, "state": state, "tool_info": {"parameters": params}}})
+
+
+def test_files_read(tmp_path):
+    target = tmp_path / "src" / "app.py"
+    out = "\n".join([
+        step("view_file", "ACTIVE", AbsolutePath=str(target)),
+        step("view_file", "DONE", AbsolutePath=str(target)),
+        step("view_file", "DONE", AbsolutePath=str(target)),
+        step("list_dir", "DONE", DirectoryPath=str(tmp_path)),
+        step("view_file", "ERROR", AbsolutePath=str(tmp_path / "denied.py")),
+    ])
+    assert ar.files_read(out, tmp_path) == ["src/app.py"]
+
+
+def test_render_lists_unread_changed_files():
+    context = {"wiki_included": [], "wiki_omitted": ["wiki/x.md"], "files_read": ["a.py"],
+               "changed_existing": ["a.py", "b.py"], "snapshot_skipped": []}
+    report = ar.render([], SHA, "m", "general", context)
+    assert "`b.py`" in report.split("開かれなかった変更ファイル")[1]
+    assert "`wiki/x.md`" in report
+    assert ar.REVIEW_MARKER_RE.search(report).groups() == (SHA, "APPROVE")
