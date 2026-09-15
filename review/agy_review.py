@@ -15,16 +15,28 @@
 
 判定の記録は PR コメントの先頭に置く HTML コメントのマーカーだけで行う。
 **head SHA ごと**に記録するので、修正を push すれば自動的に「未レビュー」に戻る。
+
+レビューでは差分と関連 Wiki ページをプロンプトに埋め込み、head 時点のリポジトリの
+スナップショットを agy に読み取り用として渡す (`--add-dir`)。スナップショットは実行後に消す。
 """
 
 import argparse
+import codecs
+import contextlib
+import fnmatch
+import io
 import json
 import os
 import re
+import shutil
+import signal
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
-from pathlib import Path
+import time
+from pathlib import Path, PurePosixPath
 
 REVIEW_DIR = Path(__file__).resolve().parent
 PROMPT_FILE = REVIEW_DIR / "prompt.md"
@@ -38,6 +50,22 @@ DEFAULT_DOMAIN = os.environ.get("REVIEW_DOMAIN", "general")
 DEFAULT_TIMEOUT_MIN = 15
 # これを超える差分は 1 回のレビューで精度が落ちる。PR を分けるのが本筋。
 DEFAULT_MAX_CHARS = 300_000
+# 埋め込む Wiki ページの合計文字数。ソースは埋め込まずスナップショットから読ませるので、
+# ここは設計判断を伝える分だけあればよい。
+DEFAULT_WIKI_CHARS = 60_000
+
+# スナップショットの一時ディレクトリ。プロセスごと強制終了されると finally が走らず残るので、
+# 次回の起動時にこの接頭辞で古いものを掃除する。
+SNAPSHOT_PREFIX = "agy-review-snapshot-"
+STALE_SNAPSHOT_HOURS = 24
+# 差分に載っていない秘匿情報を、スナップショット経由で agy (= Google) に送らないための除外。
+# コミットされていなければ tarball に入らないが、誤ってコミットされた場合の保険。
+SECRET_NAME_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ecdsa*", "id_ed25519*")
+SECRET_NAME_ALLOW = ("*.example", "*.sample", "*.template")
+# Wiki の中で、関連ページ選びの対象にしないもの (カタログ・ログ・雛形)。
+WIKI_SKIP = ("index.md", "log.md", "_template.md")
+# wiki-lint.js の CODE_REF と同じ記法 (`path/to/file.py:123 記号名`)。行番号なしのパスも拾う。
+CODE_REF_RE = re.compile(r"^([\w./-]+\.[a-zA-Z0-9]{1,5})(?::\d+)?(?:\s+.+)?$")
 
 SEVERITIES = ("CRITICAL", "WARNING", "NITPICK")
 BLOCKING = ("CRITICAL", "WARNING")
@@ -70,6 +98,14 @@ SCHEMA = {
 
 class ReviewError(RuntimeError):
     pass
+
+
+class ToolDeniedError(ReviewError):
+    """ヘッドレスで許可されないツールを agy が呼び、応答が空のまま終わった。再試行で通ることがある。"""
+
+    def __init__(self, message, denied=()):
+        super().__init__(message)
+        self.denied = list(denied)
 
 
 # ---------------------------------------------------------------------------
@@ -127,25 +163,248 @@ def pr_comments(pr):
 
 
 # ---------------------------------------------------------------------------
+# スナップショット
+# ---------------------------------------------------------------------------
+def fetch_tarball(sha, timeout=300):
+    """head 時点の tarball を bytes で返す。テキストで受けると壊れるので run() は使わない。
+
+    認証はスクリプト側の gh が持つので private リポジトリでも取れる。agy には gh を触らせない。
+    """
+    cmd = ["gh", "api", f"repos/{{owner}}/{{repo}}/tarball/{sha}"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        raise ReviewError("コマンドが見つかりません: gh")
+    except subprocess.TimeoutExpired:
+        raise ReviewError(f"tarball の取得がタイムアウトしました ({timeout} 秒)")
+    if proc.returncode != 0 or not proc.stdout:
+        raise ReviewError(f"tarball を取得できませんでした: {proc.stderr.decode('utf-8', 'replace').strip()}")
+    return proc.stdout
+
+
+def is_secret_name(name):
+    if any(fnmatch.fnmatch(name, p) for p in SECRET_NAME_ALLOW):
+        return False
+    return any(fnmatch.fnmatch(name, p) for p in SECRET_NAME_PATTERNS)
+
+
+def safe_relpath(member_name):
+    """tarball の要素名から、先頭の `<owner>-<repo>-<sha>/` を外した安全な相対パスを返す。
+
+    絶対パス・`..`・ドライブ指定を含むものは None (展開しない)。tarfile.extract は使わない —
+    Python 3.9 には展開先の外に書かせない filter が無いため、自前で検査して書き出す。
+    """
+    parts = PurePosixPath(member_name.replace("\\", "/")).parts
+    if len(parts) < 2 or member_name.startswith(("/", "\\")):
+        return None
+    rel = parts[1:]
+    if any(p in ("", ".", "..") or ":" in p for p in rel):
+        return None
+    return PurePosixPath(*rel)
+
+
+def extract_snapshot(data, dest):
+    """通常ファイルだけを dest に書き出す。(書き出した数, 除外したパスの一覧) を返す。
+
+    リンク・デバイスは展開しない (展開先の外を指せるため)。秘匿情報らしい名前も除外する。
+    """
+    written, skipped = 0, []
+    dest = Path(dest)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+        for member in tar:
+            if member.isdir():
+                continue
+            rel = safe_relpath(member.name)
+            if rel is None:
+                skipped.append(member.name)
+                continue
+            if not member.isfile() or is_secret_name(rel.name):
+                skipped.append(str(rel))
+                continue
+            target = dest.joinpath(*rel.parts)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tar.extractfile(member) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+            except OSError:
+                # Windows で使えないファイル名など。レビューを止めるほどではない。
+                skipped.append(str(rel))
+                continue
+            written += 1
+    if written == 0:
+        raise ReviewError("tarball から展開できたファイルが 0 件です。")
+    return written, skipped
+
+
+def remove_tree(path):
+    """読み取り専用属性を外しながら消す。消せたら True。"""
+    def retry(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=retry)
+    else:
+        shutil.rmtree(path, onerror=retry)
+    return not Path(path).exists()
+
+
+def sweep_stale_snapshots(tmp_root=None, now=None, hours=STALE_SNAPSHOT_HOURS):
+    """強制終了で残ったスナップショットのうち、古いものだけを消す。消したパスを返す。
+
+    実行中の別のレビューのスナップショットを消さないよう、時間で区切る。
+    """
+    root = Path(tmp_root or tempfile.gettempdir())
+    now = now if now is not None else time.time()
+    removed = []
+    for entry in root.glob(f"{SNAPSHOT_PREFIX}*"):
+        try:
+            if not entry.is_dir() or now - entry.stat().st_mtime < hours * 3600:
+                continue
+        except OSError:
+            continue
+        if remove_tree(entry):
+            removed.append(entry)
+    return removed
+
+
+@contextlib.contextmanager
+def snapshot_dir(tmp_root=None):
+    """スナップショット用の一時ディレクトリ。例外・Ctrl+C でも抜けるときに消す。"""
+    sweep_stale_snapshots(tmp_root)
+    path = Path(tempfile.mkdtemp(prefix=SNAPSHOT_PREFIX, dir=tmp_root))
+    try:
+        yield path
+    finally:
+        if not remove_tree(path):
+            print(f"[WARN] スナップショットを削除できませんでした: {path}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Wiki
+# ---------------------------------------------------------------------------
+def _unquote_git_path(path):
+    """git が引用符で囲んだパス (`"b/\\346\\227\\245.md"`) を戻す。非 ASCII や特殊文字を含むと囲まれる。"""
+    if not (len(path) >= 2 and path[0] == path[-1] == '"'):
+        return path
+    raw = codecs.escape_decode(path[1:-1].encode("utf-8"))[0]
+    return raw.decode("utf-8", "replace")
+
+
+def changed_paths(diff):
+    """差分に載っているファイルのパス (変更後の名前) を順序つきで返す。"""
+    paths = []
+    for m in re.finditer(r'^diff --git (?:"a/(?:[^"\\]|\\.)*"|a/.+?) ("b/(?:[^"\\]|\\.)*"|b/.+)$', diff, re.MULTILINE):
+        path = _unquote_git_path(m.group(1))
+        path = path[2:] if path.startswith("b/") else path
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def code_refs(text):
+    """ページ本文のコードスパンから参照しているパスを集める (フェンスの中は記法の例なので除く)。"""
+    body = re.sub(r"```[\s\S]*?```", "", text)
+    refs = set()
+    for span in re.findall(r"`([^`\n]+)`", body):
+        m = CODE_REF_RE.match(span.strip())
+        if m:
+            path = m.group(1)
+            refs.add(path[2:] if path.startswith("./") else path)
+    return refs
+
+
+def select_wiki_pages(root, changed, budget):
+    """埋め込む Wiki ページを選ぶ。(採用 [(相対パス, 本文)], 予算で外した相対パス) を返す。
+
+    候補は overview.md・差分で変更されたページ・変更ファイルを参照するページ。
+    overview → 変更されたページ → 参照している変更ファイルの多い順に、予算に収まるものを採る。
+    """
+    wiki = Path(root) / "wiki"
+    if not wiki.is_dir():
+        return [], []
+    changed = set(changed)
+    candidates = []
+    for page in sorted(wiki.rglob("*.md")):
+        rel = page.relative_to(root).as_posix()
+        if page.name in WIKI_SKIP:
+            continue
+        text = page.read_text(encoding="utf-8", errors="replace")
+        if rel == "wiki/overview.md":
+            rank = (0, 0)
+        elif rel in changed:
+            rank = (1, 0)
+        else:
+            hits = len(code_refs(text) & changed)
+            if not hits:
+                continue
+            rank = (2, -hits)
+        candidates.append((rank, rel, text))
+
+    included, omitted, used = [], [], 0
+    for _, rel, text in sorted(candidates):
+        if used + len(text) > budget:
+            omitted.append(rel)
+            continue
+        included.append((rel, text))
+        used += len(text)
+    return included, omitted
+
+
+# ---------------------------------------------------------------------------
 # プロンプトと agy の出力
 # ---------------------------------------------------------------------------
-def build_prompt(diff, domain):
+def build_prompt(diff, domain, snapshot=None, wiki_pages=(), changed=()):
+    """参考資料 → 差分 → 指示の順に並べる。長い入力では末尾の指示の方が守られやすいため。"""
     invariants = json.loads(INVARIANTS_FILE.read_text(encoding="utf-8"))
     if domain not in invariants:
         raise ReviewError(f"未知のドメインです: {domain} (選択肢: {', '.join(invariants)})")
     info = invariants[domain]
     rules = "\n".join(f"- {r}" for r in info["critical_rules"])
-    return "\n".join([
+
+    parts = ["以下の参考資料と差分を読んだ上で、末尾の「Role」以降の指示に従って差分をレビューしてください。", ""]
+    if snapshot:
+        parts += [
+            "# 参考資料 1: リポジトリのスナップショット",
+            "",
+            f"PR の head 時点のリポジトリ全体を `{snapshot}` に置いてあります(読み取り専用のコピー)。",
+            "差分に出てこない前提は、ここを開いて確認してください。変更されたファイル:",
+            "",
+            *[f"- `{snapshot / p}`" for p in changed],
+            "",
+        ]
+    if wiki_pages:
+        parts += ["# 参考資料 2: 関連する Wiki ページ", ""]
+        for rel, text in wiki_pages:
+            parts += [f"## {rel}", "", fence(text), ""]
+    parts += [
+        "# レビュー対象の差分",
+        "",
+        diff,
+        "",
         PROMPT_FILE.read_text(encoding="utf-8"),
         "",
         f"## ドメイン不変条件: {info['name']}",
         "",
         rules,
-        "",
-        "## レビュー対象の差分",
-        "",
-        diff,
-    ])
+    ]
+    return "\n".join(parts)
+
+
+def _events(stdout):
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
 
 
 def parse_output(stdout):
@@ -155,15 +414,8 @@ def parse_output(stdout):
     それを APPROVE として記録すると、レビューしていないのにレビュー済みの記録だけが残る。
     """
     result = None
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and event.get("event") == "result":
+    for event in _events(stdout):
+        if event.get("event") == "result":
             result = event.get("result") or {}
     if result is None:
         raise ReviewError("agy の出力に result イベントがありません (出力が空か途中で切れています)。")
@@ -173,6 +425,11 @@ def parse_output(stdout):
     payload = result.get("structured_output")
     if not isinstance(payload, dict):
         text = (result.get("response") or "").strip()
+        denied = [d.get("action") for d in result.get("denied_actions") or [] if isinstance(d, dict)]
+        if not text and denied:
+            # ヘッドレスでは許可を求められないツールを呼ぶと、その場で空の応答のまま終わる。
+            raise ToolDeniedError(f"agy のツール呼び出しが拒否され、レビューが途中で終わりました: {', '.join(denied)}",
+                                  denied)
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else ""
             text = text[:text.rfind("```")] if "```" in text else text
@@ -195,27 +452,104 @@ def parse_output(stdout):
     return normalized
 
 
-def call_agy(prompt, model, timeout_min):
+def files_read(stdout, root):
+    """agy が view_file で開いたファイルを、スナップショットからの相対パスで順序つきで返す。"""
+    root = Path(root).resolve()
+    seen = []
+    for event in _events(stdout):
+        step = event.get("step_update") if event.get("event") == "step_update" else None
+        if not isinstance(step, dict) or step.get("tool_name") != "view_file" or step.get("state") != "DONE":
+            continue
+        raw = ((step.get("tool_info") or {}).get("parameters") or {}).get("AbsolutePath")
+        if not raw:
+            continue
+        try:
+            shown = Path(raw).resolve().relative_to(root).as_posix()
+        except (ValueError, OSError):
+            # スナップショットの外、または OS が扱えないパス。表示のためだけなので落とさない。
+            shown = raw
+        if shown not in seen:
+            seen.append(shown)
+    return seen
+
+
+def kill_tree(proc):
+    """agy の子プロセスごと止める。残るとスナップショットのファイルを掴んだままになり消せない。"""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def call_agy(prompt, model, timeout_min, add_dir):
+    """(findings, agy の生出力) を返す。"""
     WORK_DIR.mkdir(exist_ok=True)
     schema = WORK_DIR / "schema.json"
     schema.write_text(json.dumps(SCHEMA), encoding="utf-8")
-    # 本文は -p の引数ではなく stdin で渡す。引数だと Windows のコマンドライン長 (約 32KB) に当たり、
-    # ファイルパスを渡して読ませる方式はヘッドレスでは読み取り許可が自動拒否されて空振りする。
+    # 本文は -p の引数ではなく stdin で渡す。引数だと Windows のコマンドライン長 (約 32KB) に当たる。
     message = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
-    cmd = ["agy", "--input-format", "stream-json", "--output-format", "stream-json",
+    # --add-dir で加えたディレクトリはヘッドレスでも読める (書き込みも通るので、捨てるコピーを渡す)。
+    # コマンド実行と URL 取得は許可ルールを置かない限り拒否される。
+    cmd = ["agy", "--add-dir", str(add_dir), "--input-format", "stream-json", "--output-format", "stream-json",
            "--json-schema", str(schema), "--print-timeout", f"{timeout_min}m", "--model", model]
-    # 作業ディレクトリをリポジトリの外にして、agy がリポジトリを触る余地を無くす。
-    with tempfile.TemporaryDirectory() as cwd:
-        proc = run(cmd, stdin=message, timeout=timeout_min * 60 + 60, cwd=cwd)
+    popen_extra = {} if os.name == "nt" else {"start_new_session": True}
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                cwd=str(add_dir), **popen_extra)
+    except FileNotFoundError:
+        raise ReviewError("コマンドが見つかりません: agy")
+    try:
+        out, err = proc.communicate(message.encode("utf-8"), timeout=timeout_min * 60 + 60)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        proc.communicate()
+        raise ReviewError(f"agy がタイムアウトしました ({timeout_min} 分)")
+    except BaseException:
+        kill_tree(proc)
+        raise
+    stdout = out.decode("utf-8", "replace")
+    stderr = err.decode("utf-8", "replace")
     if proc.returncode != 0:
-        tail = " / ".join(proc.stderr.strip().splitlines()[-3:])
+        tail = " / ".join(stderr.strip().splitlines()[-3:])
         raise ReviewError(f"agy が異常終了しました (exit={proc.returncode}): {tail}")
     try:
-        return parse_output(proc.stdout)
-    except ReviewError:
+        return parse_output(stdout), stdout
+    except ReviewError as e:
         dump = WORK_DIR / "agy_raw_output.txt"
-        dump.write_text(proc.stdout or "(出力なし)", encoding="utf-8")
-        raise ReviewError(f"{sys.exc_info()[1]} 生出力: {dump}")
+        dump.write_text((stdout or "(出力なし)") + ("\n--- stderr ---\n" + stderr if stderr.strip() else ""),
+                        encoding="utf-8")
+        e.args = (f"{e} 生出力: {dump}",)
+        raise
+
+
+TOOL_DENIED_RETRIES = 2
+TOOL_DENIED_NOTE = (
+    "\n\n## 注意(再実行)\n\n"
+    "前回の実行は、許可されていないツール ({denied}) を呼んだ時点で失敗しました。"
+    "コマンド実行・URL 取得・書き込みはこの環境では一切できません。"
+    "動作を確かめたくなっても実行せず、`view_file` / `grep_search` でコードを読んで推論してください。"
+)
+
+
+def call_agy_with_retry(prompt, model, timeout_min, add_dir, call=None, retries=TOOL_DENIED_RETRIES):
+    """ツール拒否で途中終了したときだけ、注意を足して再試行する。それ以外の失敗は即座に上げる。
+
+    プロンプトで読み取り系ツールに限っても、agy は検証のために `python -c` などを呼ぶことがある (実測)。
+    """
+    call = call or call_agy
+    for attempt in range(retries + 1):
+        try:
+            return call(prompt, model, timeout_min, add_dir)
+        except ToolDeniedError as e:
+            if attempt == retries:
+                raise
+            print(f"[WARN] {e} — 再試行します ({attempt + 1}/{retries})", file=sys.stderr)
+            prompt += TOOL_DENIED_NOTE.format(denied=", ".join(e.denied))
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +564,25 @@ def fence(code):
     return f"{'`' * ticks}\n{code.rstrip()}\n{'`' * ticks}"
 
 
-def render(findings, sha, model, domain):
+def render_context(context):
+    """何を見せ、agy が何を読んだか。省いたことに気づかないと「全部見た上での APPROVE」と読み違えるため。"""
+    read = context.get("files_read", [])
+    unread = [p for p in context.get("changed_existing", []) if p not in read]
+    lines = ["<details><summary>参照した資料</summary>", ""]
+    lines.append("- 埋め込んだ Wiki: " + (", ".join(f"`{p}`" for p in context.get("wiki_included", [])) or "なし"))
+    if context.get("wiki_omitted"):
+        lines.append("- 予算超過で外した Wiki: " + ", ".join(f"`{p}`" for p in context["wiki_omitted"]))
+    lines.append(f"- agy が開いたファイル ({len(read)} 件): " + (", ".join(f"`{p}`" for p in read) or "なし"))
+    if unread:
+        lines.append("- **開かれなかった変更ファイル:** " + ", ".join(f"`{p}`" for p in unread))
+    if context.get("snapshot_skipped"):
+        lines.append(f"- スナップショットから除外したファイル: {len(context['snapshot_skipped'])} 件"
+                     "(リンク・秘匿情報らしい名前・書き出せない名前)")
+    lines += ["", "</details>", ""]
+    return lines
+
+
+def render(findings, sha, model, domain, context=None):
     verdict = verdict_of(findings)
     icon = "✅" if verdict == "APPROVE" else "🔁"
     counts = " / ".join(f"{s} {sum(f['severity'] == s for f in findings)}" for s in SEVERITIES)
@@ -241,6 +593,8 @@ def render(findings, sha, model, domain):
         f"`{sha[:7]}` / `{model}` / ドメイン `{domain}` / {counts}",
         "",
     ]
+    if context is not None:
+        lines += render_context(context)
     if not findings:
         lines.append("指摘はありません。")
     for i, f in enumerate(sorted(findings, key=lambda f: SEVERITIES.index(f["severity"])), 1):
@@ -286,15 +640,30 @@ def cmd_review(args):
     if len(diff) > args.max_chars:
         raise ReviewError(f"差分が {len(diff)} 文字あり、上限 {args.max_chars} を超えています。"
                           "PR を分けるか、--max-chars で上限を上げてください。")
+    changed = changed_paths(diff)
 
-    print(f"agy ({args.model}) でレビュー中... 差分 {len(diff)} 文字")
-    findings = call_agy(build_prompt(diff, args.domain), args.model, args.timeout)
+    with snapshot_dir() as root:
+        written, skipped = extract_snapshot(fetch_tarball(sha), root)
+        wiki_pages, wiki_omitted = select_wiki_pages(root, changed, args.wiki_chars)
+        changed_existing = [p for p in changed if (root / p).is_file()]
+        print(f"スナップショット {written} ファイル / Wiki {len(wiki_pages)} ページ"
+              f"{f' (予算超過で {len(wiki_omitted)} ページ除外)' if wiki_omitted else ''}")
+        print(f"agy ({args.model}) でレビュー中... 差分 {len(diff)} 文字")
+        prompt = build_prompt(diff, args.domain, root, wiki_pages, changed_existing)
+        findings, raw = call_agy_with_retry(prompt, args.model, args.timeout, root)
+        context = {
+            "wiki_included": [rel for rel, _ in wiki_pages],
+            "wiki_omitted": wiki_omitted,
+            "files_read": files_read(raw, root),
+            "changed_existing": changed_existing,
+            "snapshot_skipped": skipped,
+        }
 
     # レビュー中に push されていたら、古い差分の結果を新しい head に紐付けない。
     if pr_info(pr)["headRefOid"] != sha:
         raise ReviewError("レビュー中に PR の head が変わりました。再実行してください。")
 
-    report = render(findings, sha, args.model, args.domain)
+    report = render(findings, sha, args.model, args.domain, context)
     WORK_DIR.mkdir(exist_ok=True)
     out = WORK_DIR / f"pr-{pr}-{sha[:7]}.md"
     out.write_text(report, encoding="utf-8")
@@ -360,6 +729,7 @@ def main():
     p.add_argument("--model", default=DEFAULT_MODEL, help=f"agy のモデル (既定: {DEFAULT_MODEL})")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_MIN, help="agy のタイムアウト (分)")
     p.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help="差分の上限文字数")
+    p.add_argument("--wiki-chars", type=int, default=DEFAULT_WIKI_CHARS, help="埋め込む Wiki ページの合計文字数")
     p.add_argument("--no-post", action="store_true", help="PR にコメントせずローカルにだけ出力する")
     args = p.parse_args()
     try:
