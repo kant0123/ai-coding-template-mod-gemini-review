@@ -340,6 +340,41 @@ def test_call_agy_kills_process_tree_when_interrupted(monkeypatch, tmp_path, exc
     assert killed == [999]
 
 
+class FinishedProc:
+    pid = 999
+    returncode = 0
+
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+    def communicate(self, *args, timeout=None):
+        return self.stdout.encode("utf-8"), b""
+
+    def poll(self):
+        return 0
+
+
+def test_call_agy_continues_conversation_and_appends_dump(monkeypatch, tmp_path):
+    monkeypatch.setattr(ar, "WORK_DIR", tmp_path / "work")
+    cmds = []
+    denied = result_line(conversation_id="conv-1", status="SUCCESS", response="",
+                         denied_actions=[{"action": "command"}])
+
+    def popen(cmd, **k):
+        cmds.append(cmd)
+        return FinishedProc(denied if len(cmds) == 1 else "second")
+
+    monkeypatch.setattr(ar.subprocess, "Popen", popen)
+    with pytest.raises(ar.ToolDeniedError) as e:
+        ar.call_agy("prompt", "model", 1, tmp_path)
+    assert "--conversation" not in cmds[0] and e.value.raw == denied
+    with pytest.raises(ar.ReviewError):
+        ar.call_agy("note", "model", 1, tmp_path, conversation="conv-1")
+    assert cmds[1][cmds[1].index("--conversation") + 1] == "conv-1"
+    dump = (tmp_path / "work" / "agy_raw_output.txt").read_text(encoding="utf-8")
+    assert dump.index(denied) < dump.index("second")
+
+
 def test_kill_tree_uses_taskkill_on_windows(monkeypatch):
     monkeypatch.setattr(ar.os, "name", "nt")
     called = []

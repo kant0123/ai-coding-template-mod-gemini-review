@@ -548,8 +548,10 @@ def call_agy(prompt, model, timeout_min, add_dir, conversation=None):
         if isinstance(e, ToolDeniedError):
             e.raw = stdout
         dump = WORK_DIR / "agy_raw_output.txt"
-        dump.write_text((stdout or "(出力なし)") + ("\n--- stderr ---\n" + stderr if stderr.strip() else ""),
-                        encoding="utf-8")
+        text = (stdout or "(出力なし)") + ("\n--- stderr ---\n" + stderr if stderr.strip() else "")
+        # 会話の続きのときは追記する。上書きすると、拒否に至った前半の出力が消えて原因を追えない。
+        with open(dump, "a" if conversation else "w", encoding="utf-8") as f:
+            f.write(f"\n=== 会話の続き ({conversation}) ===\n{text}" if conversation else text)
         e.args = (f"{e} 生出力: {dump}",)
         raise
 
