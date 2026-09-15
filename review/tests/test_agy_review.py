@@ -140,17 +140,72 @@ def test_denied_tool_with_empty_response_is_error():
     assert e.value.denied == ["command"]
 
 
-def test_retry_only_on_tool_denied():
-    prompts = []
+def denied_step(tool, params):
+    return json.dumps({"event": "step_update", "step_update": {
+        "state": "ERROR", "tool_name": tool,
+        "tool_info": {"parameters": params, "error": {"message": "user denied permission to run command"}}}})
 
-    def flaky(prompt, *a):
-        prompts.append(prompt)
-        if len(prompts) == 1:
-            raise ar.ToolDeniedError("denied", ["command"])
+
+def test_denied_error_carries_conversation_and_calls():
+    out = "\n".join([
+        denied_step("run_command", {"CommandLine": 'python -c "print(1)"'}),
+        denied_step("run_command", {"CommandLine": 'python -c "print(1)"'}),
+        result_line(conversation_id="conv-1", status="SUCCESS", response="",
+                    denied_actions=[{"action": "command"}]),
+    ])
+    with pytest.raises(ar.ToolDeniedError) as e:
+        ar.parse_output(out)
+    assert e.value.conversation == "conv-1"
+    assert e.value.calls == ['run_command: python -c "print(1)"']
+
+
+def denial(conversation="conv-1", calls=("run_command: python -c x",), raw="denied-raw"):
+    e = ar.ToolDeniedError("denied", ["command"], conversation, calls)
+    e.raw = raw
+    return e
+
+
+def test_retry_continues_denied_conversation_naming_the_call():
+    sent = []
+
+    def flaky(message, model, timeout, add_dir, conversation):
+        sent.append((message, conversation))
+        if len(sent) == 1:
+            raise denial()
         return [], "raw"
 
-    assert ar.call_agy_with_retry("P", "m", 1, "d", call=flaky) == ([], "raw")
-    assert prompts[0] == "P" and "command" in prompts[1]
+    assert ar.call_agy_with_retry("P", "m", 1, "d", call=flaky) == ([], "denied-raw\nraw")
+    assert sent[0] == ("P", None)
+    message, conversation = sent[1]
+    assert conversation == "conv-1"
+    assert "python -c x" in message and not message.startswith("P")
+
+
+def test_retry_without_conversation_restarts_with_note():
+    sent = []
+
+    def flaky(message, model, timeout, add_dir, conversation):
+        sent.append((message, conversation))
+        if len(sent) == 1:
+            raise denial(conversation=None, calls=())
+        return [], "raw"
+
+    ar.call_agy_with_retry("P", "m", 1, "d", call=flaky)
+    assert sent[1][1] is None
+    assert sent[1][0].startswith("P\n\n") and "command" in sent[1][0]
+
+
+def test_retry_note_accumulates_denied_calls():
+    sent = []
+
+    def denied_twice(message, model, timeout, add_dir, conversation):
+        sent.append(message)
+        if len(sent) <= 2:
+            raise denial(calls=(f"run_command: cmd{len(sent)}",))
+        return [], "raw"
+
+    ar.call_agy_with_retry("P", "m", 1, "d", call=denied_twice)
+    assert "cmd1" in sent[2] and "cmd2" in sent[2]
 
 
 def test_retry_gives_up_and_other_errors_are_not_retried():
@@ -158,7 +213,7 @@ def test_retry_gives_up_and_other_errors_are_not_retried():
 
     def always_denied(*a):
         calls.append(1)
-        raise ar.ToolDeniedError("denied", ["command"])
+        raise denial()
 
     with pytest.raises(ar.ToolDeniedError):
         ar.call_agy_with_retry("P", "m", 1, "d", call=always_denied, retries=2)
@@ -283,6 +338,41 @@ def test_call_agy_kills_process_tree_when_interrupted(monkeypatch, tmp_path, exc
     with pytest.raises(expected):
         ar.call_agy("prompt", "model", 1, tmp_path)
     assert killed == [999]
+
+
+class FinishedProc:
+    pid = 999
+    returncode = 0
+
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+    def communicate(self, *args, timeout=None):
+        return self.stdout.encode("utf-8"), b""
+
+    def poll(self):
+        return 0
+
+
+def test_call_agy_continues_conversation_and_appends_dump(monkeypatch, tmp_path):
+    monkeypatch.setattr(ar, "WORK_DIR", tmp_path / "work")
+    cmds = []
+    denied = result_line(conversation_id="conv-1", status="SUCCESS", response="",
+                         denied_actions=[{"action": "command"}])
+
+    def popen(cmd, **k):
+        cmds.append(cmd)
+        return FinishedProc(denied if len(cmds) == 1 else "second")
+
+    monkeypatch.setattr(ar.subprocess, "Popen", popen)
+    with pytest.raises(ar.ToolDeniedError) as e:
+        ar.call_agy("prompt", "model", 1, tmp_path)
+    assert "--conversation" not in cmds[0] and e.value.raw == denied
+    with pytest.raises(ar.ReviewError):
+        ar.call_agy("note", "model", 1, tmp_path, conversation="conv-1")
+    assert cmds[1][cmds[1].index("--conversation") + 1] == "conv-1"
+    dump = (tmp_path / "work" / "agy_raw_output.txt").read_text(encoding="utf-8")
+    assert dump.index(denied) < dump.index("second")
 
 
 def test_kill_tree_uses_taskkill_on_windows(monkeypatch):

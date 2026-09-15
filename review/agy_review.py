@@ -103,9 +103,14 @@ class ReviewError(RuntimeError):
 class ToolDeniedError(ReviewError):
     """ヘッドレスで許可されないツールを agy が呼び、応答が空のまま終わった。再試行で通ることがある。"""
 
-    def __init__(self, message, denied=()):
+    def __init__(self, message, denied=(), conversation=None, calls=()):
         super().__init__(message)
         self.denied = list(denied)
+        # 拒否された会話の ID。再試行はこの会話の続きとして行う。
+        self.conversation = conversation
+        # 拒否された呼び出しそのもの (`run_command: python -c ...`)。再試行の注意に名指しで載せる。
+        self.calls = list(calls)
+        self.raw = ""
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +434,7 @@ def parse_output(stdout):
         if not text and denied:
             # ヘッドレスでは許可を求められないツールを呼ぶと、その場で空の応答のまま終わる。
             raise ToolDeniedError(f"agy のツール呼び出しが拒否され、レビューが途中で終わりました: {', '.join(denied)}",
-                                  denied)
+                                  denied, result.get("conversation_id"), denied_calls(stdout))
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else ""
             text = text[:text.rfind("```")] if "```" in text else text
@@ -450,6 +455,24 @@ def parse_output(stdout):
             raise ReviewError(f"未知の severity です: {f.get('severity')!r}")
         normalized.append({**f, "severity": severity})
     return normalized
+
+
+def denied_calls(stdout):
+    """許可が無くて失敗したツール呼び出しを `ツール名: 引数` の形で順序つきで返す。"""
+    calls = []
+    for event in _events(stdout):
+        step = event.get("step_update") if event.get("event") == "step_update" else None
+        if not isinstance(step, dict) or step.get("state") != "ERROR":
+            continue
+        info = step.get("tool_info") or {}
+        if "denied" not in str((info.get("error") or {}).get("message", "")):
+            continue
+        params = info.get("parameters") or {}
+        arg = params.get("CommandLine") or params.get("Url") or json.dumps(params, ensure_ascii=False)
+        call = f"{step.get('tool_name')}: {arg}"
+        if call not in calls:
+            calls.append(call)
+    return calls
 
 
 def files_read(stdout, root):
@@ -486,8 +509,8 @@ def kill_tree(proc):
         proc.kill()
 
 
-def call_agy(prompt, model, timeout_min, add_dir):
-    """(findings, agy の生出力) を返す。"""
+def call_agy(prompt, model, timeout_min, add_dir, conversation=None):
+    """(findings, agy の生出力) を返す。conversation を渡すとその会話の続きとして prompt を送る。"""
     WORK_DIR.mkdir(exist_ok=True)
     schema = WORK_DIR / "schema.json"
     schema.write_text(json.dumps(SCHEMA), encoding="utf-8")
@@ -497,6 +520,8 @@ def call_agy(prompt, model, timeout_min, add_dir):
     # コマンド実行と URL 取得は許可ルールを置かない限り拒否される。
     cmd = ["agy", "--add-dir", str(add_dir), "--input-format", "stream-json", "--output-format", "stream-json",
            "--json-schema", str(schema), "--print-timeout", f"{timeout_min}m", "--model", model]
+    if conversation:
+        cmd += ["--conversation", conversation]
     popen_extra = {} if os.name == "nt" else {"start_new_session": True}
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -520,36 +545,55 @@ def call_agy(prompt, model, timeout_min, add_dir):
     try:
         return parse_output(stdout), stdout
     except ReviewError as e:
+        if isinstance(e, ToolDeniedError):
+            e.raw = stdout
         dump = WORK_DIR / "agy_raw_output.txt"
-        dump.write_text((stdout or "(出力なし)") + ("\n--- stderr ---\n" + stderr if stderr.strip() else ""),
-                        encoding="utf-8")
+        text = (stdout or "(出力なし)") + ("\n--- stderr ---\n" + stderr if stderr.strip() else "")
+        # 会話の続きのときは追記する。上書きすると、拒否に至った前半の出力が消えて原因を追えない。
+        with open(dump, "a" if conversation else "w", encoding="utf-8") as f:
+            f.write(f"\n=== 会話の続き ({conversation}) ===\n{text}" if conversation else text)
         e.args = (f"{e} 生出力: {dump}",)
         raise
 
 
-TOOL_DENIED_RETRIES = 2
+TOOL_DENIED_RETRIES = 3
 TOOL_DENIED_NOTE = (
-    "\n\n## 注意(再実行)\n\n"
-    "前回の実行は、許可されていないツール ({denied}) を呼んだ時点で失敗しました。"
-    "コマンド実行・URL 取得・書き込みはこの環境では一切できません。"
-    "動作を確かめたくなっても実行せず、`view_file` / `grep_search` でコードを読んで推論してください。"
+    "## 注意: ツール呼び出しが拒否されました\n\n"
+    "次の呼び出しは許可されておらず、この環境では**何度呼んでも実行されません**"
+    "(呼んだ時点でレビューが失敗します)。\n\n"
+    "{calls}\n\n"
+    "`run_command` / `read_url_content` / 書き込み系のツールは二度と呼ばないでください。"
+    "結果が知りたかった点は `view_file` / `grep_search` でコードを読んで推論し、"
+    "推論で済ませた点は該当する指摘の issue に「実行して確かめていない」と書いてください。"
+    "そのうえでレビューを最後まで行い、指定の JSON で結果を返してください。"
 )
 
 
 def call_agy_with_retry(prompt, model, timeout_min, add_dir, call=None, retries=TOOL_DENIED_RETRIES):
-    """ツール拒否で途中終了したときだけ、注意を足して再試行する。それ以外の失敗は即座に上げる。
+    """ツール拒否で途中終了したときだけ再試行する。それ以外の失敗は即座に上げる。(findings, 全試行の生出力) を返す。
 
     プロンプトで読み取り系ツールに限っても、agy は検証のために `python -c` などを呼ぶことがある (実測)。
+    再試行は**拒否された会話の続き**として、拒否された呼び出しを名指しした注意だけを送る。
+    最初からやり直してプロンプト末尾に一般的な注意を足すだけでは、同じコマンドを呼び直して落ちた (#22)。
+    会話 ID が取れなかったときだけ、最初のプロンプトに注意を足して新しい会話でやり直す。
     """
     call = call or call_agy
+    message, conversation, raws, calls = prompt, None, [], []
     for attempt in range(retries + 1):
         try:
-            return call(prompt, model, timeout_min, add_dir)
+            findings, raw = call(message, model, timeout_min, add_dir, conversation)
+            return findings, "\n".join(raws + [raw])
         except ToolDeniedError as e:
+            raws.append(e.raw)
             if attempt == retries:
                 raise
             print(f"[WARN] {e} — 再試行します ({attempt + 1}/{retries})", file=sys.stderr)
-            prompt += TOOL_DENIED_NOTE.format(denied=", ".join(e.denied))
+            calls += [c for c in e.calls or [f"{d}: (内容不明)" for d in e.denied] if c not in calls]
+            note = TOOL_DENIED_NOTE.format(calls="\n".join(f"- `{c}`" for c in calls))
+            if e.conversation:
+                message, conversation = note, e.conversation
+            else:
+                message, conversation = f"{prompt}\n\n{note}", None
 
 
 # ---------------------------------------------------------------------------
