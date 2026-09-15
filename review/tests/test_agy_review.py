@@ -298,6 +298,31 @@ def test_changed_paths():
     assert ar.changed_paths(DIFF) == ["src/app.py", "wiki/components/app.md"]
 
 
+def test_changed_paths_with_quoted_and_spaced_names():
+    # 非 ASCII・特殊文字を含むパスは git が引用符で囲み、UTF-8 のバイトを 8 進でエスケープする。
+    diff = "\n".join([
+        'diff --git "a/docs/\\346\\227\\245\\346\\234\\254.md" "b/docs/\\346\\227\\245\\346\\234\\254.md"',
+        "diff --git a/my dir/file.txt b/my dir/file.txt",
+        'diff --git "a/q\\"uote.txt" "b/q\\"uote.txt"',
+    ])
+    assert ar.changed_paths(diff) == ["docs/日本.md", "my dir/file.txt", 'q"uote.txt']
+
+
+def test_files_read_survives_unresolvable_path(monkeypatch, tmp_path):
+    # agy が OS の扱えないパスで view_file を呼んでも、レビュー結果ごと失わない。
+    real_resolve = ar.Path.resolve
+
+    def resolve(self, *a, **k):
+        if "bad" in str(self):
+            raise OSError("invalid name")
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(ar.Path, "resolve", resolve)
+    out = step("view_file", "DONE", AbsolutePath="bad<name>.py")
+    assert ar.files_read(out, tmp_path) == ["bad<name>.py"]
+
+
+
 def write_page(root, rel, body):
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)

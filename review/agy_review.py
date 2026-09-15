@@ -21,6 +21,7 @@
 """
 
 import argparse
+import codecs
 import contextlib
 import fnmatch
 import io
@@ -277,12 +278,22 @@ def snapshot_dir(tmp_root=None):
 # ---------------------------------------------------------------------------
 # Wiki
 # ---------------------------------------------------------------------------
+def _unquote_git_path(path):
+    """git が引用符で囲んだパス (`"b/\\346\\227\\245.md"`) を戻す。非 ASCII や特殊文字を含むと囲まれる。"""
+    if not (len(path) >= 2 and path[0] == path[-1] == '"'):
+        return path
+    raw = codecs.escape_decode(path[1:-1].encode("utf-8"))[0]
+    return raw.decode("utf-8", "replace")
+
+
 def changed_paths(diff):
     """差分に載っているファイルのパス (変更後の名前) を順序つきで返す。"""
     paths = []
-    for m in re.finditer(r"^diff --git a/(.+?) b/(.+)$", diff, re.MULTILINE):
-        if m.group(2) not in paths:
-            paths.append(m.group(2))
+    for m in re.finditer(r'^diff --git (?:"a/(?:[^"\\]|\\.)*"|a/.+?) ("b/(?:[^"\\]|\\.)*"|b/.+)$', diff, re.MULTILINE):
+        path = _unquote_git_path(m.group(1))
+        path = path[2:] if path.startswith("b/") else path
+        if path not in paths:
+            paths.append(path)
     return paths
 
 
@@ -445,7 +456,8 @@ def files_read(stdout, root):
             continue
         try:
             shown = Path(raw).resolve().relative_to(root).as_posix()
-        except ValueError:
+        except (ValueError, OSError):
+            # スナップショットの外、または OS が扱えないパス。表示のためだけなので落とさない。
             shown = raw
         if shown not in seen:
             seen.append(shown)
