@@ -135,8 +135,43 @@ def test_changes_requested_with_triage_passes():
 # --- ツール拒否: 途中で終わったレビューを APPROVE にしない ----------------------
 def test_denied_tool_with_empty_response_is_error():
     out = result_line(status="SUCCESS", response="", denied_actions=[{"action": "command"}])
-    with pytest.raises(ar.ReviewError, match="command"):
+    with pytest.raises(ar.ToolDeniedError, match="command") as e:
         ar.parse_output(out)
+    assert e.value.denied == ["command"]
+
+
+def test_retry_only_on_tool_denied():
+    prompts = []
+
+    def flaky(prompt, *a):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise ar.ToolDeniedError("denied", ["command"])
+        return [], "raw"
+
+    assert ar.call_agy_with_retry("P", "m", 1, "d", call=flaky) == ([], "raw")
+    assert prompts[0] == "P" and "command" in prompts[1]
+
+
+def test_retry_gives_up_and_other_errors_are_not_retried():
+    calls = []
+
+    def always_denied(*a):
+        calls.append(1)
+        raise ar.ToolDeniedError("denied", ["command"])
+
+    with pytest.raises(ar.ToolDeniedError):
+        ar.call_agy_with_retry("P", "m", 1, "d", call=always_denied, retries=2)
+    assert len(calls) == 3
+
+    def broken(*a):
+        calls.append(1)
+        raise ar.ReviewError("empty")
+
+    calls.clear()
+    with pytest.raises(ar.ReviewError):
+        ar.call_agy_with_retry("P", "m", 1, "d", call=broken)
+    assert len(calls) == 1
 
 
 # --- スナップショットの展開 -----------------------------------------------------

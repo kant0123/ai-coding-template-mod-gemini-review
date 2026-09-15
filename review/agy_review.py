@@ -100,6 +100,14 @@ class ReviewError(RuntimeError):
     pass
 
 
+class ToolDeniedError(ReviewError):
+    """ヘッドレスで許可されないツールを agy が呼び、応答が空のまま終わった。再試行で通ることがある。"""
+
+    def __init__(self, message, denied=()):
+        super().__init__(message)
+        self.denied = list(denied)
+
+
 # ---------------------------------------------------------------------------
 # 外部コマンド
 # ---------------------------------------------------------------------------
@@ -420,7 +428,8 @@ def parse_output(stdout):
         denied = [d.get("action") for d in result.get("denied_actions") or [] if isinstance(d, dict)]
         if not text and denied:
             # ヘッドレスでは許可を求められないツールを呼ぶと、その場で空の応答のまま終わる。
-            raise ReviewError(f"agy のツール呼び出しが拒否され、レビューが途中で終わりました: {', '.join(denied)}")
+            raise ToolDeniedError(f"agy のツール呼び出しが拒否され、レビューが途中で終わりました: {', '.join(denied)}",
+                                  denied)
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else ""
             text = text[:text.rfind("```")] if "```" in text else text
@@ -510,11 +519,37 @@ def call_agy(prompt, model, timeout_min, add_dir):
         raise ReviewError(f"agy が異常終了しました (exit={proc.returncode}): {tail}")
     try:
         return parse_output(stdout), stdout
-    except ReviewError:
+    except ReviewError as e:
         dump = WORK_DIR / "agy_raw_output.txt"
         dump.write_text((stdout or "(出力なし)") + ("\n--- stderr ---\n" + stderr if stderr.strip() else ""),
                         encoding="utf-8")
-        raise ReviewError(f"{sys.exc_info()[1]} 生出力: {dump}")
+        e.args = (f"{e} 生出力: {dump}",)
+        raise
+
+
+TOOL_DENIED_RETRIES = 2
+TOOL_DENIED_NOTE = (
+    "\n\n## 注意(再実行)\n\n"
+    "前回の実行は、許可されていないツール ({denied}) を呼んだ時点で失敗しました。"
+    "コマンド実行・URL 取得・書き込みはこの環境では一切できません。"
+    "動作を確かめたくなっても実行せず、`view_file` / `grep_search` でコードを読んで推論してください。"
+)
+
+
+def call_agy_with_retry(prompt, model, timeout_min, add_dir, call=None, retries=TOOL_DENIED_RETRIES):
+    """ツール拒否で途中終了したときだけ、注意を足して再試行する。それ以外の失敗は即座に上げる。
+
+    プロンプトで読み取り系ツールに限っても、agy は検証のために `python -c` などを呼ぶことがある (実測)。
+    """
+    call = call or call_agy
+    for attempt in range(retries + 1):
+        try:
+            return call(prompt, model, timeout_min, add_dir)
+        except ToolDeniedError as e:
+            if attempt == retries:
+                raise
+            print(f"[WARN] {e} — 再試行します ({attempt + 1}/{retries})", file=sys.stderr)
+            prompt += TOOL_DENIED_NOTE.format(denied=", ".join(e.denied))
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +650,7 @@ def cmd_review(args):
               f"{f' (予算超過で {len(wiki_omitted)} ページ除外)' if wiki_omitted else ''}")
         print(f"agy ({args.model}) でレビュー中... 差分 {len(diff)} 文字")
         prompt = build_prompt(diff, args.domain, root, wiki_pages, changed_existing)
-        findings, raw = call_agy(prompt, args.model, args.timeout, root)
+        findings, raw = call_agy_with_retry(prompt, args.model, args.timeout, root)
         context = {
             "wiki_included": [rel for rel, _ in wiki_pages],
             "wiki_omitted": wiki_omitted,
