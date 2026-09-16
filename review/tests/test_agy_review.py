@@ -229,6 +229,16 @@ def test_retry_gives_up_and_other_errors_are_not_retried():
     assert len(calls) == 1
 
 
+def test_prompt_ends_with_environment_note(tmp_path):
+    # 会話ログを読ませないための指示。長い入力では末尾の指示の方が守られるので末尾に置く。
+    prompt = ar.build_prompt("diff --git a/x b/x", "general", tmp_path, [], ["x"])
+    assert prompt.rstrip().endswith(ar.ENVIRONMENT_NOTE.rstrip())
+    # 切り詰めは中間を落とすので、先頭にも置いてどちらかが必ず残るようにする。
+    assert prompt.count(ar.ENVIRONMENT_NOTE) == 2
+    assert prompt.index(ar.ENVIRONMENT_NOTE) < prompt.index("diff --git")
+    assert "transcript_full.jsonl" in ar.TOOL_DENIED_NOTE
+
+
 # --- スナップショットの展開 -----------------------------------------------------
 def make_tar(entries):
     """entries: [(name, bytes | None, type)]。type は tarfile の型定数。"""
