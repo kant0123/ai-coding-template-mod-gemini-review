@@ -362,6 +362,19 @@ def select_wiki_pages(root, changed, budget):
 # ---------------------------------------------------------------------------
 # プロンプトと agy の出力
 # ---------------------------------------------------------------------------
+ENVIRONMENT_NOTE = """## この環境の制約(agy CLI・ヘッドレス)
+
+- **コマンド実行・URL 取得・ファイルの書き込みは許可されていません。** 呼んだ時点で拒否され、
+  レビューが応答なしで終了します。確かめたいことは `view_file` / `grep_search` で読んで推論し、
+  実行していない点は該当する指摘の issue にその旨を書いてください。
+- **agy 自身の会話ログを読もうとしないでください** (`transcript.jsonl` / `transcript_full.jsonl`、
+  `.gemini/antigravity-cli/brain/` 配下)。表示上このメッセージが `<truncated NNNN bytes>` と
+  切り詰められて見えても、**本文は全文があなたに渡っています**(実測で確認済み。約 4KB を超える
+  メッセージは保存・表示側だけが切り詰められます)。読み直す必要はなく、試みると拒否されて
+  レビューが失敗します。
+"""
+
+
 def build_prompt(diff, domain, snapshot=None, wiki_pages=(), changed=()):
     """参考資料 → 差分 → 指示の順に並べる。長い入力では末尾の指示の方が守られやすいため。"""
     invariants = json.loads(INVARIANTS_FILE.read_text(encoding="utf-8"))
@@ -395,6 +408,10 @@ def build_prompt(diff, domain, snapshot=None, wiki_pages=(), changed=()):
         f"## ドメイン不変条件: {info['name']}",
         "",
         rules,
+        "",
+        # agy CLI 固有の事情なので prompt.md (上流と共有) ではなくここに置く。末尾なのは、
+        # 長い入力では末尾の指示の方が守られやすいため。
+        ENVIRONMENT_NOTE,
     ]
     return "\n".join(parts)
 
@@ -563,6 +580,8 @@ TOOL_DENIED_NOTE = (
     "(呼んだ時点でレビューが失敗します)。\n\n"
     "{calls}\n\n"
     "`run_command` / `read_url_content` / 書き込み系のツールは二度と呼ばないでください。"
+    "会話ログ (`transcript.jsonl` / `transcript_full.jsonl`) を読み直す必要もありません"
+    "(切り詰めて表示されているだけで、本文は全文渡っています)。"
     "結果が知りたかった点は `view_file` / `grep_search` でコードを読んで推論し、"
     "推論で済ませた点は該当する指摘の issue に「実行して確かめていない」と書いてください。"
     "そのうえでレビューを最後まで行い、指定の JSON で結果を返してください。"
