@@ -383,7 +383,9 @@ def build_prompt(diff, domain, snapshot=None, wiki_pages=(), changed=()):
     info = invariants[domain]
     rules = "\n".join(f"- {r}" for r in info["critical_rules"])
 
-    parts = ["以下の参考資料と差分を読んだ上で、末尾の「Role」以降の指示に従って差分をレビューしてください。", ""]
+    # 先頭と末尾の両方に置く。切り詰めは中間を落とすので、どちらか一方は必ず残る。
+    parts = ["以下の参考資料と差分を読んだ上で、末尾の「Role」以降の指示に従って差分をレビューしてください。", "",
+             ENVIRONMENT_NOTE, ""]
     if snapshot:
         parts += [
             "# 参考資料 1: リポジトリのスナップショット",

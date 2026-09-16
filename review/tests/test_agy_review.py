@@ -233,7 +233,9 @@ def test_prompt_ends_with_environment_note(tmp_path):
     # 会話ログを読ませないための指示。長い入力では末尾の指示の方が守られるので末尾に置く。
     prompt = ar.build_prompt("diff --git a/x b/x", "general", tmp_path, [], ["x"])
     assert prompt.rstrip().endswith(ar.ENVIRONMENT_NOTE.rstrip())
-    assert "transcript_full.jsonl" in prompt
+    # 切り詰めは中間を落とすので、先頭にも置いてどちらかが必ず残るようにする。
+    assert prompt.count(ar.ENVIRONMENT_NOTE) == 2
+    assert prompt.index(ar.ENVIRONMENT_NOTE) < prompt.index("diff --git")
     assert "transcript_full.jsonl" in ar.TOOL_DENIED_NOTE
 
 
