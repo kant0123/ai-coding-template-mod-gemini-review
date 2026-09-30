@@ -85,7 +85,8 @@ push 前に確かめること:
 
 - PR #33 — `.agent/skills/agy-review/SKILL.md` 手順 4 — 「CRITICAL が未確認ならマージしない」を足したが、手順 4 の見出しと結びは未確認でも無条件にマージさせていた
 - PR #33 — `review/agy_review.py check_merge()` — 同じルールを hook が判定していなかった
-- PR #33 — `.agent/skills/pr-finish/SKILL.md` — PR 本文テンプレートに「未確認」の起票が無かった
+- PR #33 — `.agent/skills/pr-finish/SKILL.md` — PR 本文テンプレートと手順 4 の振り分けに「未確認」が無かった
+- PR #33 — `.agent/skills/agy-review/SKILL.md` フローチャート — 未確認の CRITICAL もマージに至る経路として描いていた(この種類を台帳に足した PR 自身で再発)
 
 ### 主目的のページ以外に触った Wiki の付随更新を漏らす
 
