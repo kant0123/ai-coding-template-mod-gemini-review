@@ -15,9 +15,10 @@
 // よく守る一方、Wiki 全体にまたがる整合性は自然には保てない。そこが壊れる。
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CODE_REF, codeSpans, collect, isPlaceholder, parseFrontmatter, stripNonLinks } from './wiki-refs.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const WIKI = join(ROOT, 'wiki');
@@ -34,9 +35,8 @@ const TYPES = new Set(Object.values(DIR_TYPE));
 // 参照先が無くてよい(CLAUDE.md / docs/wiki_workflow.md の取り決め)。
 const PLANNED_HEADING = /^#{1,6}\s*未作成ページ/m;
 
-// コード参照 `path/to/file.js:123 記号名` の記法。記号名は任意だが、付いていれば検証する。
-// 行番号だけのアンカーは編集のたびに黙ってずれるので、記号名を主・行番号を補助として扱う。
-const CODE_REF = /^([\w./-]+\/[\w.-]+\.[a-zA-Z0-9]{1,5}):(\d+)(?:\s+(.+))?$/;
+// コード参照の記法(CODE_REF)とページの解釈は scripts/wiki-refs.js にある(hook と共有するため)。
+
 // 記号名が指す行と、書かれている行番号のズレをどこまで許すか。
 const ANCHOR_SLACK = 5;
 
@@ -55,58 +55,6 @@ const WRITE_INDEX = process.argv.includes('--write-index');
 const errors = [];
 const notes = [];
 const fail = (file, message) => errors.push({ file, message });
-
-/** wiki/ 配下の .md を再帰的に集める(テンプレートは検査対象外)。 */
-function collect(dir) {
-  const found = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) found.push(...collect(full));
-    else if (entry.name.endsWith('.md') && entry.name !== '_template.md') found.push(full);
-  }
-  return found;
-}
-
-/**
- * リンク抽出の前に、リンクとして数えてはいけない部分を落とす。
- * - コードブロック / コードスパン: 記法そのものを説明している箇所(「`[[...]]` で参照する」)
- * - HTML コメント: index.md の記入例が `<!-- 例: - [[auth-session]] ... -->` の形で入っている
- */
-function stripNonLinks(text) {
-  return text
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/`[^`\n]*`/g, '');
-}
-
-/**
- * コードスパン(`...`)の中身を集める。フェンス付きコードブロックは記法の説明・入力例が
- * 入るので対象外(そこに書かれたパスは実在しなくてよい)。
- */
-function codeSpans(text) {
-  return [...text.replace(/```[\s\S]*?```/g, '').matchAll(/`([^`\n]+)`/g)].map((m) => m[1].trim());
-}
-
-/** `<YYYY-MM-DD>` のような未記入プレースホルダか。テンプレート初期状態を落とさないため。 */
-const isPlaceholder = (value) => typeof value === 'string' && /^<.*>$/.test(value.trim());
-
-/** frontmatter を最小限に解釈する。YAML パーサは入れない(依存を増やさないため)。 */
-function parseFrontmatter(text) {
-  if (!text.startsWith('---')) return null;
-  const end = text.indexOf('\n---', 3);
-  if (end === -1) return null;
-  const fields = {};
-  for (const line of text.slice(3, end).split('\n')) {
-    const match = /^([a-z]+):\s*(.*)$/.exec(line.trim());
-    if (!match) continue;
-    const [, key, rawValue] = match;
-    const value = rawValue.trim();
-    fields[key] = value.startsWith('[')
-      ? value.replace(/^\[|\]$/g, '').split(',').map((v) => v.trim()).filter(Boolean)
-      : value;
-  }
-  return fields;
-}
 
 /** そのファイルを最後に触ったコミットの日付。取れなければ null(git 管理外・浅いクローン)。 */
 function lastCommitDate(file) {
