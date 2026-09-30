@@ -1,7 +1,7 @@
 ---
 type: concept
 summary: システム全体像と各ページへの入口
-updated: <YYYY-MM-DD>
+updated: 2026-09-30
 related: [recurring-review-findings]
 ---
 

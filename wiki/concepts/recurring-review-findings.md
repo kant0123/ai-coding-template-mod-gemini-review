@@ -67,6 +67,21 @@ push 前に確かめること:
 - PR #8 — `review/agy_review.py` — `cmd_review` / `cmd_triage` / `cmd_check` / `call_agy` / `ci_state` にテストが無かった
 - PR #23 — `review/agy_review.py call_agy()` — 再試行時の `--conversation` 付与にテストが無かった
 
+### 主目的のページ以外に触った Wiki の付随更新を漏らす
+
+新しいページを書くことに気を取られ、リンクを張るためだけに触った既存ページの `updated`、
+`log.md` の「更新:」行を漏らす。`wiki-lint` はテンプレートのプレースホルダーのような
+一部のケースを注意止まりにするので、lint が通っても漏れは残る。
+
+push 前に確かめること:
+
+- `git diff --stat origin/main -- wiki/` に出る各ページの `updated` を今日にしたか
+- 同じ一覧のページが、`log.md` のエントリの「更新:」「新規:」にすべて載っているか
+
+実例:
+
+- PR #34 — `wiki/overview.md` — リンクを足したが `updated` をプレースホルダーのまま残し、log の「更新:」にも載せなかった
+
 ### 再試行・再実行で前回の成果物を上書きする
 
 同じ処理を 2 回目に走らせたとき、1 回目の出力やログを同じパスに書いて消している。
