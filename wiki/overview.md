@@ -1,8 +1,8 @@
 ---
 type: concept
 summary: システム全体像と各ページへの入口
-updated: <YYYY-MM-DD>
-related: []
+updated: 2026-09-30
+related: [recurring-review-findings]
 ---
 
 # <project-name> 全体像
@@ -37,6 +37,8 @@ related: []
 ## 触る前に知っておくこと
 
 <初見で必ず踏む落とし穴を 3〜5 個。詳細は各ページへ>
+
+- レビューで繰り返し差し戻された誤りの種類は [[recurring-review-findings]]。着手時と push 前に読む
 
 ## 運用
 
