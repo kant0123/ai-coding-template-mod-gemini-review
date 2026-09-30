@@ -32,7 +32,7 @@ Write-Host "=== エージェントルール汎用テンプレート セットア
 if (Test-Path ".gitignore") {
     Write-Host ""
     Write-Host "[.gitignore] 既存の .gitignore を検出しました。テンプレートの内容を追記します。"
-    $templateLines = @(".claude/settings.local.json", ".claude/worktrees/", "__pycache__/", "*.pyc", ".env")
+    $templateLines = @(".claude/settings.local.json", ".claude/worktrees/", ".claude/logs/", "__pycache__/", "*.pyc", ".env")
     $existing = Get-Content ".gitignore" -ErrorAction SilentlyContinue
     $added = 0
     foreach ($line in $templateLines) {
@@ -157,7 +157,7 @@ if ($wikiChoice -ne "y") {
         $ans = Ask "  ⚠ wiki/ を削除しますか? (y/n)" "n"
         if ($ans -eq "y") {
             Remove-Item -Recurse -Force "wiki"
-            Write-Host "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節、wiki-ingest / wiki-lint スキル、docs/wiki_workflow.md も削除してください。"
+            Write-Host "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節、wiki-ingest / wiki-lint スキル、.claude/hooks/wiki_context.mjs と settings の該当 hook、docs/wiki_workflow.md も削除してください。"
         } else {
             Write-Host "  -> wiki/ を維持しました。"
         }

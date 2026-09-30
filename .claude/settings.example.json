@@ -33,6 +33,16 @@
             "command": "bash .claude/hooks/check_agy_review.sh"
           }
         ]
+      },
+      {
+        "_comment": "[オプション] 触ろうとしているファイルを参照している Wiki ページを差し込み、作業途中でも関連ページを読ませる。同じページは 1 セッション 1 回。wiki/ を採用しないなら削除。",
+        "matcher": "Edit|Write|MultiEdit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/wiki_context.mjs"
+          }
+        ]
       }
     ]
   }

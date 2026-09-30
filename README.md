@@ -36,7 +36,7 @@ CI/CD の仕組みはエージェントに依存しない汎用部分。
 | [review/](review/README.md) | agy レビューの実体(レビュー実行スクリプト・プロンプト・5 ドメインの不変条件定義) | オプション |
 | [.agent/skills/agent-config-manager/](.agent/skills/agent-config-manager/SKILL.md) | 「ルールを追加して」等の要求に対し、Rule/Hook/Skill/Workflow のどれで実装すべきかを判断するスキル | 推奨 |
 | [.agent/skills/skill-template/](.agent/skills/skill-template/SKILL.md) | 新しい Skill を作るときのひな形。コピーして使う | オプション |
-| [.claude/hooks/](.claude/hooks/check_wiki_updated.sh) | `gh pr create` の直前に `wiki/` の更新有無を確認する hook と、`gh pr merge` の直前に agy レビューの記録を確認する hook | オプション |
+| [.claude/hooks/](.claude/hooks/check_wiki_updated.sh) | `gh pr create` の直前に `wiki/` の更新有無を確認する hook と、`gh pr merge` の直前に agy レビューの記録を確認する hook、ファイルに触る直前にそのファイルを参照している Wiki ページを差し込む hook(`wiki_context.mjs`) | オプション |
 | [.claude/settings.example.json](.claude/settings.example.json) | permissions / hooks の設定例 | オプション |
 | [docs/development_workflow.md](docs/development_workflow.md) | worktree ベースの Git 運用 + CI/CD の全体像 | 推奨 |
 | [docs/wiki_workflow.md](docs/wiki_workflow.md) | Wiki の背景・導入手順・既存プロジェクトからの移行手順 | 推奨 |

@@ -210,6 +210,7 @@ CRITICAL が未確認のままならマージしない(評価の `[CRITICAL] ...
 | --- | --- | --- |
 | レビュー結果と差し戻しの評価 | PR コメント(head SHA ごとのマーカー) | merge hook、PR の経緯を追う人 |
 | 誤検知(`false-positive`)・見逃し(`false-negative`) | 上流の Issue | プロンプトを直す人。全プロジェクト共通 |
+| 妥当だった指摘(実装側の誤り)の種類 | `wiki/concepts/recurring-review-findings.md` | 次の実装者。着手時と push 前 |
 | 評価の過程で分かった設計上の知見 | `wiki/` | 次にそのコードを触る人 |
 | レポート・agy の生出力 | `review/work/`(使い捨て) | その場のデバッグだけ |
 

@@ -112,6 +112,30 @@ wiki-lint)は [.agent/skills/wiki-ingest/SKILL.md](../.agent/skills/wiki-ingest/
 仕分けが終わったらディレクトリごと削除し、`docs/design/README.md` への参照を
 `CLAUDE.md` / `README.md` / hook 設定から取り除く。
 
+## 作業途中の Query — 関連ページの差し込み (オプション)
+
+「着手前に `wiki/index.md` を読む」は着手時の 1 回きりで、**作業途中で別領域のファイルに
+踏み込んでも関連ページは読み直されない**(実セッションを監査すると、Wiki はセッション開始時にしか
+読まれていなかったという報告がある)。規約を足しても同じことなので、読むきっかけを hook で作る。
+
+[.claude/hooks/wiki_context.mjs](../.claude/hooks/wiki_context.mjs) は、Edit / Write / Read の直前に
+「そのファイルをコード参照(`path/to/file.py:123 記号名()`)で挙げている Wiki ページ」を逆引きし、
+ページ名・`summary`・パスだけをエージェントに差し込む。
+
+- **対応関係は人間が書いたコード参照から取る。** キーワードの一致や埋め込み検索にしないのは、
+  外れた差し込みが続くと読み飛ばされるようになるため。代わりに、**コード参照を持たないページは
+  差し込まれない** — `concepts/` の「なぜ」のページは、参照を持つ `components/` のページから
+  `related` とリンクで辿れるようにしておく。
+- **本文は入れない。** 読むかどうかはエージェントに決めさせる。同じページは 1 セッションに 1 回だけ。
+- **失敗しても作業を止めない**(フェイルオープン)。助言であってガードではないため。
+- 逆引きは `wiki-lint.js` と同じ解析部品(`scripts/wiki-refs.js`)を使う。lint が通るコード参照は
+  hook も拾う。
+- **効いているかを測る。** 差し込みと、その後の Wiki ページの Read が `.claude/logs/wiki-context.jsonl`
+  (git 管理外)に残る。`node .claude/hooks/wiki_context.mjs --stats` で「差し込んだページのうち
+  実際に読まれた割合」が出る。低いまま変わらないなら、差し込みの文面か対象の絞り方を見直す。
+
+有効にするには `.claude/settings.example.json` の該当 hook を `settings.json` に写す。
+
 ## Lint(健康診断)
 
 検査は**機械に任せる部分**と**エージェントに任せる部分**に分かれる。

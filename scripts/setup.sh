@@ -36,7 +36,7 @@ if [[ -f ".gitignore" ]]; then
     echo ""
     echo "[.gitignore] 既存の .gitignore を検出しました。テンプレートの内容を追記します。"
     # テンプレートの各行を既存ファイルに追記（重複行はスキップ）
-    template_lines=(".claude/settings.local.json" ".claude/worktrees/" "__pycache__/" "*.pyc" ".env")
+    template_lines=(".claude/settings.local.json" ".claude/worktrees/" ".claude/logs/" "__pycache__/" "*.pyc" ".env")
     added=0
     for line in "${template_lines[@]}"; do
         if ! grep -qxF "$line" .gitignore; then
@@ -159,7 +159,7 @@ if [[ "$wiki_choice" != "y" ]]; then
         ans=$(ask "  ⚠ wiki/ を削除しますか? (y/n)" "n")
         if [[ "$ans" == "y" ]]; then
             rm -rf wiki
-            echo "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節、wiki-ingest / wiki-lint スキル、docs/wiki_workflow.md も削除してください。"
+            echo "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節、wiki-ingest / wiki-lint スキル、.claude/hooks/wiki_context.mjs と settings の該当 hook、docs/wiki_workflow.md も削除してください。"
         else
             echo "  -> wiki/ を維持しました。"
         fi
