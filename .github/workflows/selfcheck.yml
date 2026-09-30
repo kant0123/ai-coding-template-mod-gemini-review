@@ -71,6 +71,10 @@ jobs:
           pip install pytest
           python -m pytest review/tests -q
 
+      - name: Wiki 差し込み hook のテスト
+        # 関連ページの逆引き・セッション内の重複排除・フェイルオープン・計測の回帰テスト。
+        run: node --test .claude/hooks/test/wiki_context.test.mjs
+
       - name: PowerShell の構文
         shell: pwsh
         run: |
