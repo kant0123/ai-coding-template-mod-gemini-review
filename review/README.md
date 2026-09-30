@@ -2,7 +2,7 @@
 
 PR の CI が緑になった後、マージの前に、差分を **agy (Antigravity CLI) 経由で Gemini に 1 回レビューさせる**仕組み。
 差し戻しがあれば実装したエージェント(Claude)が指摘を評価し、修正して再レビューするか、
-誤検知として上流に起票してマージする。手順は [agy-review スキル](../.agent/skills/agy-review/SKILL.md)。
+誤検知・未確認として起票してマージする(未確認の CRITICAL が残るならマージしない)。手順は [agy-review スキル](../.agent/skills/agy-review/SKILL.md)。
 
 採用しない場合、以下をまとめて削除する。
 

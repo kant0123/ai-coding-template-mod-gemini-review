@@ -21,7 +21,8 @@ push → CI ─緑→ agy レビュー ─APPROVE→ merge
         │       CHANGES_REQUESTED
         │            ↓ 指摘を 1 件ずつ評価
         └─ 修正 ←─ 成立を確かめた指摘がある
-                     すべて的外れ・未確認 → 起票 → 評価を記録 → merge
+                     すべて的外れ・未確認(WARNING) → 起票 → 評価を記録 → merge
+                     未確認の CRITICAL が残る → 起票 → 評価を記録 → 人間に報告(merge しない)
 ```
 
 ## 1. CI が緑になってからレビューする
