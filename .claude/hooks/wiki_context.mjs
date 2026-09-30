@@ -79,7 +79,11 @@ function sweepStates() {
     for (const name of readdirSync(tmpdir())) {
       if (!name.startsWith(STATE_PREFIX)) continue;
       const full = join(tmpdir(), name);
-      if (statSync(full).mtimeMs < limit) unlinkSync(full);
+      try {
+        if (statSync(full).mtimeMs < limit) unlinkSync(full);
+      } catch {
+        // 1 ファイルが別プロセスに掴まれていても、残りの掃除は続ける。
+      }
     }
   } catch {
     // 掃除できなくても困らない。
@@ -96,17 +100,29 @@ function lookup(byFile, rel) {
 }
 
 function stats(base) {
-  let lines;
+  let raw;
   try {
-    lines = readFileSync(logFile(base), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    raw = readFileSync(logFile(base), 'utf8');
   } catch {
     console.log(`記録がありません: ${logFile(base)}`);
     return;
   }
+  // 行ごとに読む。複数セッションの同時追記や強制終了で壊れた行が 1 行混ざっても、
+  // 残りの記録ごと捨てない。
+  const lines = [];
+  let broken = 0;
+  for (const line of raw.split('\n').filter((l) => l.trim())) {
+    try {
+      lines.push(JSON.parse(line));
+    } catch {
+      broken += 1;
+    }
+  }
+  if (broken) console.log(`(読めない行を ${broken} 行飛ばした)`);
   // (セッション, ページ) ごとに「差し込まれた後に Read されたか」を見る。
   const injected = new Map();
   for (const entry of lines) {
-    if (entry.event === 'inject') {
+    if (entry.event === 'inject' && Array.isArray(entry.pages)) {
       for (const page of entry.pages) {
         const key = `${entry.session}\t${page}`;
         if (!injected.has(key)) injected.set(key, { page, read: false });

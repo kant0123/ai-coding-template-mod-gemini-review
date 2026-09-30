@@ -6,7 +6,7 @@
 // 起動して標準出力を見る(Claude Code が実際に呼ぶのと同じ形)。
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -106,4 +106,13 @@ test('差し込みと、その後の Wiki ページの Read を記録し、--sta
   assert.match(log, /"event":"read","session":"s8","page":"auth-session"/);
   // s1 / s2 / s3 / s6 / s8 の 5 件が差し込まれ、Read されたのは s8 だけ。
   assert.match(runHook('', ['--stats']), /差し込み: 5 件.*Read された: 1 件 \(20%\)/);
+});
+
+test('記録に壊れた行が混ざっても、残りの記録で集計する', () => {
+  const logPath = join(main, '.claude', 'logs', 'wiki-context.jsonl');
+  // 途中で切れた書き込みと、JSON としては読めるが形の違う行。
+  appendFileSync(logPath, '{"event":"inj\n{"event":"inject"}\n');
+  const out = runHook('', ['--stats']);
+  assert.match(out, /読めない行を 1 行飛ばした/);
+  assert.match(out, /差し込み: 5 件.*Read された: 1 件 \(20%\)/);
 });
