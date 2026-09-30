@@ -146,6 +146,12 @@ def test_unverified_warning_and_false_positive_critical_pass():
     assert ar.check_merge(comments, SHA)[0]
 
 
+def test_unverified_in_reason_text_does_not_block():
+    comments = (review(SHA, "CHANGES_REQUESTED") + triage(SHA)
+                + "- 1. [CRITICAL] 認可漏れ — 誤検知。未確認のユーザーは `app/routes.py:40` で弾いている → https://example.com/1\n")
+    assert ar.check_merge(comments, SHA)[0]
+
+
 def test_unverified_critical_of_old_head_does_not_block():
     comments = (review(OTHER, "CHANGES_REQUESTED") + triage(OTHER)
                 + "- 1. [CRITICAL] 認可漏れ — 未確認。 → #61\n"

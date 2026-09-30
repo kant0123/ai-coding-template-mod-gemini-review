@@ -788,11 +788,12 @@ def triage_bodies(comments, sha):
     return bodies
 
 
-UNVERIFIED_CRITICAL_RE = re.compile(r"^\s*-.*\[CRITICAL\].*未確認", re.MULTILINE)
+# 判定は最初の `—` の直後の語。理由文に「未確認」が出てくるだけでは止めない。
+UNVERIFIED_CRITICAL_RE = re.compile(r"^\s*-[^\n]*\[CRITICAL\][^—\n]*—\s*未確認", re.MULTILINE)
 
 
 def has_unverified_critical(bodies):
-    """評価行 `- N. [CRITICAL] ... — 未確認。...` があるか。後続の無関係なコメントを拾っても止める側に倒れる。"""
+    """評価行 `- N. [CRITICAL] <題> — 未確認。...` があるか。"""
     return any(UNVERIFIED_CRITICAL_RE.search(b) for b in bodies)
 
 
