@@ -770,8 +770,9 @@ def check_merge(comments, sha):
                        "CI が緑になってから `python review/agy_review.py` を実行してください。")
     if verdict == "CHANGES_REQUESTED" and sha not in triaged:
         return False, (f"head `{sha[:7]}` のレビューは差し戻しで、評価が記録されていません。"
-                       "指摘を評価し、的外れなら上流に起票した上で `python review/agy_review.py --triage <file>` を実行してください。"
-                       "妥当な指摘があるなら修正して push してください。")
+                       "指摘を評価し、的外れなら上流に、確かめられないならこのリポジトリに起票した上で "
+                       "`python review/agy_review.py --triage <file>` を実行してください。"
+                       "成立を確かめた指摘があるなら修正して push してください。")
     return True, f"head `{sha[:7]}` は agy レビュー済みです ({verdict})。"
 
 
