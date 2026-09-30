@@ -793,8 +793,11 @@ UNVERIFIED_CRITICAL_RE = re.compile(r"^\s*-[^\n]*\[CRITICAL\][^—\n]*—\s*未�
 
 
 def has_unverified_critical(bodies):
-    """評価行 `- N. [CRITICAL] <題> — 未確認。...` があるか。"""
-    return any(UNVERIFIED_CRITICAL_RE.search(b) for b in bodies)
+    """最新の評価に `- N. [CRITICAL] <題> — 未確認。...` の行があるか。
+
+    未確認を確かめた後に評価を記録し直せるよう、古い評価は見ない。
+    """
+    return bool(bodies) and bool(UNVERIFIED_CRITICAL_RE.search(bodies[-1]))
 
 
 def cmd_check(args):
