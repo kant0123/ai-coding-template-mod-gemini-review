@@ -89,6 +89,9 @@ related: [page-a, page-b]
 ---
 ```
 
+`summary` が一行要約の正、`updated` は最後にそのページを触った日、`related` は双方向。
+`wiki/index.md`(カタログ)と `wiki/log.md`(ログ)はページではないので frontmatter を付けない。
+
 `index.md` のカタログは `summary` から生成されるので、**index を手で編集しない**。
 
 ```bash

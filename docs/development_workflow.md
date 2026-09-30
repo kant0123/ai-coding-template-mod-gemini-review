@@ -66,6 +66,8 @@ flowchart TD
 | 実装後 | `wiki-ingest` | 影響ページの更新 → `log.md` 追記 → wiki-lint |
 | 完了 | `pr-finish` | push → PR → CI → (agy レビュー)→ マージ → 後始末 → Issue クローズ → 反映確認 |
 | CI 緑の後 | `agy-review`(オプション) | agy でレビュー → 差し戻しを評価 → 修正ループ / 誤検知を起票してマージ |
+| 作業中 | `file-issue` | スコープ外の問題をその場で起票(対象の判断・粒度・本文) |
+| 依頼時 | `wiki-lint` | Wiki の健康診断(機械検査 → 矛盾・乖離の洗い出し) |
 
 ### 1. 開始 — worktree を作る
 

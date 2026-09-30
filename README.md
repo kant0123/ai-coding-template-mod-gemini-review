@@ -30,6 +30,8 @@ CI/CD の仕組みはエージェントに依存しない汎用部分。
 | [.agent/skills/worktree-start/](.agent/skills/worktree-start/SKILL.md) | 着手手順(Wiki を読む → Issue 確保 → `origin/main` から worktree) | 推奨 |
 | [.agent/skills/wiki-ingest/](.agent/skills/wiki-ingest/SKILL.md) | 実装後に変更を `wiki/` へ反映する手順(Wiki を採用する場合) | 推奨 |
 | [.agent/skills/pr-finish/](.agent/skills/pr-finish/SKILL.md) | 完了手順(PR → CI → マージ → 後始末 → Issue クローズ → 反映確認)。`--fill` / `Fixes` / `--delete-branch` の罠つき | 推奨 |
+| [.agent/skills/wiki-lint/](.agent/skills/wiki-lint/SKILL.md) | 依頼されたときに Wiki 全体を健康診断する手順(機械検査 → 矛盾・乖離の洗い出し。矛盾の 2 種類の扱い) | 推奨(Wiki を採用する場合) |
+| [.agent/skills/file-issue/](.agent/skills/file-issue/SKILL.md) | 作業中に見つけたスコープ外の問題を、その場で起票する手順(対象の判断・粒度・本文) | 推奨(Issue 連携を採用する場合) |
 | [.agent/skills/agy-review/](.agent/skills/agy-review/SKILL.md) | CI 緑の後に差分を agy (Gemini) でレビューし、差し戻しを評価して修正ループ / 誤検知の起票に振り分ける手順 | オプション |
 | [review/](review/README.md) | agy レビューの実体(レビュー実行スクリプト・プロンプト・5 ドメインの不変条件定義) | オプション |
 | [.agent/skills/agent-config-manager/](.agent/skills/agent-config-manager/SKILL.md) | 「ルールを追加して」等の要求に対し、Rule/Hook/Skill/Workflow のどれで実装すべきかを判断するスキル | 推奨 |
@@ -132,7 +134,8 @@ CLAUDE.md 内の「[オプション]」と付いた節は、対応する仕組�
 - **手順はスキルへ、不変条件は CLAUDE.md へ。** 逐次手順まで `CLAUDE.md` に書くと、
   毎セッション全文がコンテキストに載るうえ、「絶対に守ること」と「今回の段取り」が混ざって
   どちらも守られなくなる。`CLAUDE.md` には破ると事故になる不変条件だけを置き、
-  コマンドの並びと罠は `worktree-start` / `wiki-ingest` / `pr-finish` の 3 スキルに降ろしてある。
+  コマンドの並び・罠・判断基準は `worktree-start` / `wiki-ingest` / `wiki-lint` / `pr-finish` /
+  `agy-review` / `file-issue` の各スキルに、理由と背景は `docs/` に降ろしてある。
   スキルが発火しなかった場合でも `CLAUDE.md` だけで安全側に倒れるよう、両者は意図的に
   一部重複させている。
 - **事故から学んだ禁止事項を明文化する。** 「メインツリーで git checkout/merge/pull しない」

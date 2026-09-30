@@ -157,7 +157,7 @@ if ($wikiChoice -ne "y") {
         $ans = Ask "  ⚠ wiki/ を削除しますか? (y/n)" "n"
         if ($ans -eq "y") {
             Remove-Item -Recurse -Force "wiki"
-            Write-Host "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節と docs/wiki_workflow.md も削除してください。"
+            Write-Host "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節、wiki-ingest / wiki-lint スキル、docs/wiki_workflow.md も削除してください。"
         } else {
             Write-Host "  -> wiki/ を維持しました。"
         }

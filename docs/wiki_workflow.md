@@ -1,8 +1,8 @@
 # ナレッジ Wiki 運用ガイド
 
 このドキュメントは `wiki/` の**背景と導入手順を人間が読むためのもの**。
-エージェント向けの実行ルールは [CLAUDE.md](../CLAUDE.md) の「ナレッジ Wiki」節にあり、
-内容が食い違った場合は `CLAUDE.md` を正とする。
+エージェント向けの不変条件は [CLAUDE.md](../CLAUDE.md) の「ナレッジ Wiki」節、手順とページ規約は
+`wiki-ingest` / `wiki-lint` スキルにあり、内容が食い違った場合はそちらを正とする。
 
 ## なぜ設計書駆動から移行するのか
 
@@ -26,7 +26,7 @@ Wiki 方式はここを反転させる。ページは**現状を表す生きた�
 - **トークンも自動では減らない。** 読むとき(`index.md` → 関連 2〜3 ページ)は減るが、
   書くとき(1 PR で数ページ更新)は増える。読む回数が書く回数を上回る開発では差し引きで得になる。
 - **書きすぎると逆効果。** コードの写しを Wiki に置くと、陳腐化した複製が増えるだけで
-  トークンも精度も悪化する。`CLAUDE.md` の「何を書き、何を書かないか」が最も重要な規約。
+  トークンも精度も悪化する。`wiki-ingest` スキルの「何を書き、何を書かないか」が最も重要な規約。
 
 ## 3 層
 
@@ -37,8 +37,8 @@ Wiki 方式はここを反転させる。ページは**現状を表す生きた�
 [Wiki]      wiki/ 配下の md。エージェントが所有し、毎 PR で更新する
      │
      ▼
-[スキーマ]  CLAUDE.md の「ナレッジ Wiki」節。ページ規約と役割分担の定義
-     │       ← 実際に手を動かす順序は .agent/skills/wiki-ingest/SKILL.md
+[スキーマ]  CLAUDE.md の「ナレッジ Wiki」節(不変条件)と wiki-ingest / wiki-lint スキル
+     │       ← ページ規約と手を動かす順序はスキル側に置く
 ```
 
 **コードが正、Wiki が従。** 乖離を見つけたら Wiki を直す。
@@ -67,7 +67,9 @@ Wiki 更新を別 PR に切り出さないこと。実装と知識の反映が�
 
 エージェントが実際に踏む手順(影響ページの特定 → `updated` の更新 → `log.md` 追記 →
 wiki-lint)は [.agent/skills/wiki-ingest/SKILL.md](../.agent/skills/wiki-ingest/SKILL.md)
-にある。`CLAUDE.md` 側にはページ規約と「何を書き、何を書かないか」だけを残してある。
+にある。`CLAUDE.md` 側には、スキルが発火しなくても守られている必要がある不変条件だけを残してある。
+依頼を受けて Wiki 全体を健康診断する手順(矛盾の 2 種類の扱いを含む)は
+[.agent/skills/wiki-lint/SKILL.md](../.agent/skills/wiki-lint/SKILL.md)。
 
 ## 既存プロジェクトへの導入手順
 
@@ -76,7 +78,7 @@ wiki-lint)は [.agent/skills/wiki-ingest/SKILL.md](../.agent/skills/wiki-ingest/
 
 ### ステップ 1: 骨組みを入れる (`chore/wiki-bootstrap` の 1 PR)
 
-1. `wiki/` 一式と `CLAUDE.md` の「ナレッジ Wiki」節を追加する。
+1. `wiki/` 一式と `CLAUDE.md` の「ナレッジ Wiki」節、`wiki-ingest` / `wiki-lint` スキルを追加する。
 2. `wiki/overview.md` を書く。既存 README の「技術スタック」「データモデル」
    「ディレクトリ構成」あたりが素材になる。
 3. 主要な構成要素 5〜10 個について `wiki/components/` にページを起こす。
