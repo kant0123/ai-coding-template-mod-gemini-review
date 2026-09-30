@@ -159,7 +159,7 @@ if [[ "$wiki_choice" != "y" ]]; then
         ans=$(ask "  ⚠ wiki/ を削除しますか? (y/n)" "n")
         if [[ "$ans" == "y" ]]; then
             rm -rf wiki
-            echo "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節と docs/wiki_workflow.md も削除してください。"
+            echo "  -> wiki/ を削除しました。CLAUDE.md の「ナレッジ Wiki」節、wiki-ingest / wiki-lint スキル、docs/wiki_workflow.md も削除してください。"
         else
             echo "  -> wiki/ を維持しました。"
         fi

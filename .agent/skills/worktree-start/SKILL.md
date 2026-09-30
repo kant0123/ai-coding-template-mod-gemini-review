@@ -57,6 +57,12 @@ gh issue create --label <bug|enhancement|documentation|...> \
 秘匿情報(トークン・鍵・Webhook URL・`config.local.*` の中身)は private リポジトリでも
 本文に書かない。
 
+Projects ボードを使う場合は、ボードに追加してステータスを `In Progress` にする。
+
+```bash
+gh project item-add <番号> --owner <owner> --url <issue の URL>
+```
+
 ### 3. worktree を切る
 
 ```bash
@@ -84,7 +90,6 @@ git worktree add ../<repo>-<作業名> -b <branch> origin/main
 - **`git add` はファイルを明示指定する。** 他セッションの未コミット変更が混ざりうるため、
   `git diff --cached` で確認してからコミットする。
 - **スコープ外の問題を見つけたら、その場で `gh issue create` する。** 今の作業は中断しない。
-  チャットに書いただけでは記録に残らず失われる。粒度の判断は `CLAUDE.md` の
-  「粒度 — 何件に分けるか」に従う。
+  チャットに書いただけでは記録に残らず失われる。対象・粒度・本文の書き方は `file-issue` スキル。
 
 実装が固まったら `wiki-ingest`、PR 作成以降は `pr-finish` に進む。
