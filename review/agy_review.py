@@ -773,7 +773,27 @@ def check_merge(comments, sha):
                        "指摘を評価し、的外れなら上流に、確かめられないならこのリポジトリに起票した上で "
                        "`python review/agy_review.py --triage <file>` を実行してください。"
                        "成立を確かめた指摘があるなら修正して push してください。")
+    if verdict == "CHANGES_REQUESTED" and has_unverified_critical(triage_bodies(comments, sha)):
+        return False, (f"head `{sha[:7]}` の評価に未確認の CRITICAL があります。"
+                       "マージせず、状況を人間に報告してください。")
     return True, f"head `{sha[:7]}` は agy レビュー済みです ({verdict})。"
+
+
+def triage_bodies(comments, sha):
+    """sha に対する評価コメントの本文。次のマーカーまでを 1 件とみなす(コメントの境界は取れないため)。"""
+    marker = f"<!-- agy-review-triage sha={sha} -->"
+    bodies = []
+    for part in comments.split(marker)[1:]:
+        bodies.append(re.split(r"<!-- agy-review", part, maxsplit=1)[0])
+    return bodies
+
+
+UNVERIFIED_CRITICAL_RE = re.compile(r"^\s*-.*\[CRITICAL\].*未確認", re.MULTILINE)
+
+
+def has_unverified_critical(bodies):
+    """評価行 `- N. [CRITICAL] ... — 未確認。...` があるか。後続の無関係なコメントを拾っても止める側に倒れる。"""
+    return any(UNVERIFIED_CRITICAL_RE.search(b) for b in bodies)
 
 
 def cmd_check(args):

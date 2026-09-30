@@ -132,6 +132,28 @@ def test_changes_requested_with_triage_passes():
     assert ar.check_merge(review(SHA, "CHANGES_REQUESTED") + triage(SHA), SHA)[0]
 
 
+def test_unverified_critical_blocks():
+    comments = (review(SHA, "CHANGES_REQUESTED") + triage(SHA)
+                + "- 1. [CRITICAL] 認可漏れ — 未確認。本番でしか起きない → #61\n")
+    ok, reason = ar.check_merge(comments, SHA)
+    assert not ok and "未確認の CRITICAL" in reason
+
+
+def test_unverified_warning_and_false_positive_critical_pass():
+    comments = (review(SHA, "CHANGES_REQUESTED") + triage(SHA)
+                + "- 1. [CRITICAL] 認可漏れ — 誤検知。`app/routes.py:40` で検証済み → https://example.com/1\n"
+                + "- 2. [WARNING] Podfile — 未確認。Ruby が無い → #61\n")
+    assert ar.check_merge(comments, SHA)[0]
+
+
+def test_unverified_critical_of_old_head_does_not_block():
+    comments = (review(OTHER, "CHANGES_REQUESTED") + triage(OTHER)
+                + "- 1. [CRITICAL] 認可漏れ — 未確認。 → #61\n"
+                + review(SHA, "CHANGES_REQUESTED") + triage(SHA)
+                + "- 1. [WARNING] N+1 — スコープ外 → #58\n")
+    assert ar.check_merge(comments, SHA)[0]
+
+
 # --- ツール拒否: 途中で終わったレビューを APPROVE にしない ----------------------
 def test_denied_tool_with_empty_response_is_error():
     out = result_line(status="SUCCESS", response="", denied_actions=[{"action": "command"}])
